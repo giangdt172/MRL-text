@@ -1,0 +1,17 @@
+# Training and evaluation
+torch
+transformers
+numpy
+pandas
+tqdm
+scipy
+scikit-learn
+
+# SentencePiece tokenizers used by some supported encoders
+sentencepiece
+
+# Download the original dataset bundles
+kaggle
+
+# Offline tests
+pytest
