@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from .encoder_loss import encoder_losses
 from .flag_math import flag_loss_and_grad, orthogonality_error, stiefel_step
 from .pairs import build_pair_weights
+from .trace_ratio import trace_ratio_loss_and_grad
 
 
 def resolve_dims(full_dim, dims=None):
@@ -26,7 +27,7 @@ class FlagProjector(nn.Module):
     """FP32 orthonormal basis, updated explicitly rather than by AdamW.
 
     a_j = number of supervised prefixes containing coordinate j / number of levels.
-    The spherical objective uses x @ U @ diag(sqrt(a)); encoder loss uses x @ U.
+    Flag objectives use x @ U @ diag(sqrt(a)); encoder loss uses x @ U.
     """
 
     def __init__(self, full_dim, dims=None, init="random", lr=0.1, eps=1e-4,
@@ -71,23 +72,35 @@ class FlagProjector(nn.Module):
             return F.normalize(projected, dim=-1) if normalize else projected
 
     @torch.no_grad()
-    def step(self, q, p, target, pos_ids=None, far_mode="uniform", far_tau=0.1):
+    def step(self, q, p, target, pos_ids=None, far_mode="uniform", far_tau=0.1,
+             *, objective="spherical"):
+        if objective not in {"spherical", "trace_ratio"}:
+            raise ValueError(f"Unknown flag objective: {objective}")
         with torch.autocast(device_type=q.device.type, enabled=False):
             q, p = F.normalize(q.detach().float(), dim=-1), F.normalize(p.detach().float(), dim=-1)
             near, far, valid = build_pair_weights(q, p, target, pos_ids, far_mode, far_tau)
             if not valid:
                 return {"flag_skipped": 1.0}
-            loss, positive, negative, gradient = flag_loss_and_grad(
-                self.U, self.a_col, (q, p, near), (q, p, far), self.eps, self.lambda_neg)
+            if objective == "trace_ratio":
+                loss, positive, negative, gradient = trace_ratio_loss_and_grad(
+                    self.U, self.a_col, (q, p, near), (q, p, far), self.eps)
+                metrics = {"flag_pos_scatter": positive, "flag_neg_scatter": negative,
+                           "flag_trace_ratio": -loss}
+            else:
+                loss, positive, negative, gradient = flag_loss_and_grad(
+                    self.U, self.a_col, (q, p, near), (q, p, far), self.eps, self.lambda_neg)
+                metrics = {"flag_gap": positive - negative,
+                           "flag_pos_cosine": positive, "flag_neg_cosine": negative}
             basis, norm = stiefel_step(self.U, gradient, self.lr, self.retraction)
             self.U.copy_(basis)
-            return {"flag_loss": loss, "flag_gap": positive - negative,
-                    "flag_pos_cosine": positive, "flag_neg_cosine": negative,
+            return {"flag_loss": loss, **metrics,
                     "flag_gnorm": norm, "flag_orth_err": orthogonality_error(self.U),
                     "flag_skipped": 0.0}
 
 
 class FlagMRLLoss(nn.Module):
+    flag_objective = "spherical"
+
     def __init__(self, projector, temperature=0.07, update_every=1, level_weights=None,
                  lambda_cross=0.0, far_mode="uniform", far_tau=0.1):
         super().__init__()
@@ -122,7 +135,8 @@ class FlagMRLLoss(nn.Module):
             raise ValueError("target must give a valid int64 positive index per query.")
         metrics = {"flag_skipped": 1.0}
         if self.training and int(self.step_idx) % self.update_every == 0:
-            metrics = self.projector.step(q, p, target, pos_ids, self.far_mode, self.far_tau)
+            metrics = self.projector.step(q, p, target, pos_ids, self.far_mode, self.far_tau,
+                                          objective=self.flag_objective)
         with torch.autocast(device_type=q.device.type, enabled=False):
             basis = self.projector.U.detach().clone()
             loss, encoder_metrics = encoder_losses(

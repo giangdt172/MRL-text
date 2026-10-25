@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -gt 0 ]]; then
-    echo "Configure with environment variables (MODEL_KEY, DATA_PATH, OUTPUT_DIR, ...), or run train.py directly for CLI options." >&2
-    exit 2
-fi
+LOSS_TYPE="${LOSS_TYPE:-flag_mrl}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --loss_type)
+            if [[ $# -lt 2 ]]; then
+                echo "--loss_type requires flag_mrl or flag_mrl_trace_ratio." >&2
+                exit 2
+            fi
+            LOSS_TYPE="$2"
+            shift 2
+            ;;
+        *)
+            echo "Usage: $0 [--loss_type flag_mrl|flag_mrl_trace_ratio]. Configure other options with environment variables (MODEL_KEY, DATA_PATH, OUTPUT_DIR, ...)." >&2
+            exit 2
+            ;;
+    esac
+done
+case "$LOSS_TYPE" in
+    flag_mrl|flag_mrl_trace_ratio) ;;
+    *) echo "Unknown loss_type: $LOSS_TYPE; choose flag_mrl or flag_mrl_trace_ratio." >&2; exit 2 ;;
+esac
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
@@ -30,6 +47,7 @@ fi
 
 "$PYTHON_BIN" -u FlagMRL/train.py \
     "${MODEL_ARGS[@]}" \
+    --loss_type "$LOSS_TYPE" \
     --data_path "$DATA_PATH" \
     --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" --precision "${PRECISION:-auto}" \

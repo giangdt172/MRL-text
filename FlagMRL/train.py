@@ -1,4 +1,4 @@
-"""Single-GPU text embedding training with alternating spherical FlagMRL updates."""
+"""Single-GPU text embedding training with alternating FlagMRL updates."""
 
 import argparse
 import json
@@ -19,7 +19,7 @@ from transformers import AutoModel, get_scheduler
 
 from FlagMRL.config import MODEL_CONFIGS
 from FlagMRL.data_preparation import build_train_loader
-from FlagMRL.loss import FlagMRLLoss, FlagProjector
+from FlagMRL import LOSS_TYPES, FlagProjector
 from FlagMRL.model import FlagTextModel, mean_pooling
 
 
@@ -117,7 +117,8 @@ def train(args):
     else:
         logger.info("Device: CPU | precision=%s", precision)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
-    logger.info("Model: %s | data: %s | output: %s", model_name, args.data_path, output_dir)
+    logger.info("Model: %s | loss_type: %s | data: %s | output: %s",
+                model_name, args.loss_type, args.data_path, output_dir)
     # Use the existing CSV mapping, two-view collator, and loader without changes.
     loader, tokenizer, _ = build_train_loader(
         args.data_path, model_name, "pair_cls", args.max_length, args.batch_size)
@@ -133,7 +134,7 @@ def train(args):
         lr=args.flag_lr, eps=args.flag_eps, lambda_neg=args.flag_lambda_neg,
         retraction=args.flag_retraction, seed=args.seed).to(device)
     model = FlagTextModel(encoder, projector)
-    criterion = FlagMRLLoss(
+    criterion = LOSS_TYPES[args.loss_type](
         projector, temperature=args.temperature, update_every=args.flag_update_every,
         level_weights=args.flag_level_weights, lambda_cross=args.flag_lambda_cross,
         far_mode=args.flag_far_mode, far_tau=args.flag_far_tau).to(device)
@@ -161,7 +162,8 @@ def train(args):
         return q, p, ids
 
     if args.flag_init == "spherical":
-        logger.info("Initializing flag basis with up to %d frozen-encoder batches", args.flag_init_batches)
+        logger.info("Initializing flag basis (%s) with up to %d frozen-encoder batches",
+                    criterion.flag_objective, args.flag_init_batches)
         encoder.eval()
         with torch.no_grad():
             for index, batch in enumerate(loader):
@@ -169,7 +171,7 @@ def train(args):
                     break
                 q, p, ids = encode(batch)
                 projector.step(q, p, torch.arange(q.size(0), device=device), ids,
-                               args.flag_far_mode, args.flag_far_tau)
+                               args.flag_far_mode, args.flag_far_tau, objective=criterion.flag_objective)
 
     configuration = {**vars(args), "model_name": model_name, "matryoshka_dims": projector.dims,
                      "resolved_device": str(device), "resolved_precision": precision,
@@ -217,7 +219,9 @@ def train(args):
                     log.flush()
                     logger.info("epoch=%d batch=%d loss=%.6f lr=%.3g optimizer_steps=%d skipped=%d",
                                 epoch + 1, batches, values["loss"], values["lr"], optimizer_steps, skipped_steps)
-                progress.set_postfix(loss=f"{values['loss']:.4f}", flag_gap=f"{values.get('flag_gap', 0):.4f}")
+                diagnostic = "flag_trace_ratio" if criterion.flag_objective == "trace_ratio" else "flag_gap"
+                progress.set_postfix({"loss": f"{values['loss']:.4f}",
+                                      diagnostic: f"{values.get(diagnostic, 0):.4f}"})
             log.flush()
             model.save_pretrained(output_dir, tokenizer)
             logger.info("Epoch %d complete | mean_loss=%.6f | skipped optimizer steps=%d | saved %s",
@@ -231,6 +235,8 @@ def parse_args(argv=None):
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
     parser.add_argument("--data_path", required=True)
+    parser.add_argument("--loss_type", choices=list(LOSS_TYPES), default="flag_mrl",
+                        help="Flag objective: flag_mrl (spherical) or flag_mrl_trace_ratio")
     parser.add_argument("--output_dir", default="checkpoints/FlagMRL")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -242,11 +248,13 @@ def parse_args(argv=None):
     parser.add_argument("--matryoshka_dims", type=int, nargs="+", default=None,
                         help="Ascending level weights order; hidden_size is always included")
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--flag_init", choices=["random", "identity", "spherical"], default="random")
+    parser.add_argument("--flag_init", choices=["random", "identity", "spherical"], default="random",
+                        help="spherical warms up the basis with the selected loss_type objective")
     parser.add_argument("--flag_init_batches", type=int, default=8)
     parser.add_argument("--flag_lr", type=float, default=0.1)
     parser.add_argument("--flag_eps", type=float, default=1e-4)
-    parser.add_argument("--flag_lambda_neg", type=float, default=1.0)
+    parser.add_argument("--flag_lambda_neg", type=float, default=1.0,
+                        help="Negative cosine weight for flag_mrl; unused by flag_mrl_trace_ratio")
     parser.add_argument("--flag_retraction", choices=["svd", "newton_schulz"], default="svd")
     parser.add_argument("--flag_update_every", type=int, default=1)
     parser.add_argument("--flag_level_weights", type=float, nargs="+", default=None)
