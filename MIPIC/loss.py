@@ -124,6 +124,12 @@ class PipelineInfoNCELoss(nn.Module):
         self.phi = nn.Sequential(nn.Linear(d_src, d_hidden), nn.ReLU(), nn.Linear(d_hidden, d_tgt))
 
     def forward(self, src_hidden: torch.Tensor, tgt_hidden: torch.Tensor, mask: Optional[torch.Tensor]=None, temperature: float=0.07) -> torch.Tensor:
+        # In FP16, normalize's eps=1e-12 rounds to zero: a zero projection
+        # becomes 0/0. Keep the same objective, evaluated in FP32.
+        with torch.autocast(device_type=src_hidden.device.type, enabled=False):
+            return self._forward(src_hidden.float(), tgt_hidden.float(), temperature)
+
+    def _forward(self, src_hidden, tgt_hidden, temperature):
         u_src = src_hidden[:, 0, :]
         v_tgt = tgt_hidden[:, 0, :]
         u_proj = self.phi(u_src)
@@ -180,13 +186,17 @@ class TotalAlignmentLoss(nn.Module):
             self.infonce_modules[key] = PipelineInfoNCELoss(d_src=dim_i, d_tgt=dim_j, d_hidden=max(dim_i, dim_j) // 2)
 
     def forward(self, hidden_states: List[torch.Tensor], mask: Optional[torch.Tensor]=None) -> Dict[str, torch.Tensor]:
+        with torch.autocast(device_type=hidden_states[0].device.type, enabled=False):
+            return self._forward(hidden_states, mask)
+
+    def _forward(self, hidden_states, mask):
         total_att_loss = 0.0
         total_cka_loss = 0.0
         total_chain_loss = 0.0
         att_count = 0
         cka_count = 0
         for layer_idx in self.align_layers:
-            full_layer = hidden_states[layer_idx]
+            full_layer = hidden_states[layer_idx].float()
             for dim in self.matryoshka_dims:
                 if dim >= self.d_full:
                     continue
@@ -205,8 +215,8 @@ class TotalAlignmentLoss(nn.Module):
         if cka_count > 0:
             total_cka_loss = total_cka_loss / cka_count
         for layer_i, dim_i, layer_j, dim_j in self.parsed_pipeline_pairs:
-            src_hidden = hidden_states[layer_i][..., :dim_i]
-            tgt_hidden = hidden_states[layer_j][..., :dim_j]
+            src_hidden = hidden_states[layer_i][..., :dim_i].float()
+            tgt_hidden = hidden_states[layer_j][..., :dim_j].float()
             key = f'pipe_{layer_i}_{dim_i}_to_{layer_j}_{dim_j}'
             infonce_module = self.infonce_modules[key]
             chain_loss = infonce_module(src_hidden=src_hidden, tgt_hidden=tgt_hidden, mask=mask, temperature=0.07)
@@ -217,6 +227,11 @@ class TotalAlignmentLoss(nn.Module):
 
 
 def Matry_infonce(a, b, temperature=0.07, nested_dims=[64, 128, 256, 512, 768]):
+    with torch.autocast(device_type=a.device.type, enabled=False):
+        return _matry_infonce_fp32(a.float(), b.float(), temperature, nested_dims)
+
+
+def _matry_infonce_fp32(a, b, temperature, nested_dims):
     assert a.dim() == 2, f'Expected a to be 2D [batch, dim], got shape {a.shape}'
     assert b.dim() == 2, f'Expected b to be 2D [batch, dim], got shape {b.shape}'
     assert a.shape == b.shape, f'a and b must have same shape, got {a.shape} vs {b.shape}'

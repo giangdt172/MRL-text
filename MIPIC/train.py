@@ -129,6 +129,49 @@ def resolve_alignment(model_name, encoder_config, args):
     return dims, list(layers), [list(pipe) for pipe in pipes]
 
 
+def compute_batch_loss(encoder, alignment, first, second, dims, pooling, temperature, precision):
+    device = first["input_ids"].device
+    amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=precision != "fp32"):
+        out1 = encoder(**first, output_hidden_states=True, return_dict=True)
+        out2 = encoder(**second, output_hidden_states=True, return_dict=True)
+    # Loss math stays FP32; CKA retains its notebook FP64 computation.
+    losses1 = alignment(out1.hidden_states, first["attention_mask"])
+    losses2 = alignment(out2.hidden_states, second["attention_mask"])
+    losses = {key: (losses1[key] + losses2[key]) / 2 for key in losses1}
+    q = pool_hidden(out1.last_hidden_state, first["attention_mask"], pooling)
+    p = pool_hidden(out2.last_hidden_state, second["attention_mask"], pooling)
+    contrastive, _ = Matry_infonce(q, p, temperature, dims)
+    return (0.4 * losses["total_loss"] + 0.6 * contrastive).float(), losses, contrastive
+
+
+def stable_batch_loss(encoder, alignment, first, second, dims, pooling, temperature, precision, logger):
+    device = first["input_ids"].device
+    if precision == "fp16":
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+    result = compute_batch_loss(encoder, alignment, first, second, dims, pooling, temperature, precision)
+    forward_precision = precision
+    if not torch.isfinite(result[0]) and precision == "fp16":
+        components = {key: float(value.detach()) if torch.is_tensor(value) else float(value)
+                      for key, value in result[1].items()}
+        components["contrastive_loss"] = float(result[2].detach())
+        forward_precision = "bf16" if device.type == "cuda" and torch.cuda.is_bf16_supported() else "fp32"
+        logger.warning("Non-finite FP16 loss: %s. Retrying the same batch with %s forward.",
+                       components, forward_precision)
+        del result  # Free the failed autograd graph before retrying.
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state(cuda_rng, device)
+        result = compute_batch_loss(encoder, alignment, first, second, dims, pooling, temperature, forward_precision)
+    if not torch.isfinite(result[0]):
+        components = {key: float(value.detach()) if torch.is_tensor(value) else float(value)
+                      for key, value in result[1].items()}
+        components["contrastive_loss"] = float(result[2].detach())
+        raise FloatingPointError(f"Non-finite MIPIC loss with {forward_precision} forward: {components}")
+    return (*result, forward_precision)
+
+
 def train(args):
     validate_args(args)
     if args.run_eval:
@@ -174,7 +217,6 @@ def train(args):
     if args.warmup_steps not in {None, 0}:
         raise ValueError("Notebook MIPIC training uses constant LR; warmup_steps must be 0.")
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and precision == "fp16")
-    amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     logger.info("Parameter dtype: %s | autocast: %s | GradScaler enabled: %s",
                 next(encoder.parameters()).dtype, precision, scaler.is_enabled())
     configuration = {
@@ -185,6 +227,7 @@ def train(args):
         "gradient_clipping": "separate_encoder_alignment", "singleton_batches": "keep",
         "loss_type": "mipic", "resolved_device": str(device), "resolved_precision": precision,
         "parameter_dtype": "float32", "grad_scaler_enabled": scaler.is_enabled(),
+        "loss_math_dtype": "float32", "fp16_nonfinite_retry": "bf16_if_supported_else_fp32",
         "torch_version": str(torch.__version__),
     }
     (output_dir / "training_config.json").write_text(json.dumps(configuration, indent=2) + "\n")
@@ -200,18 +243,8 @@ def train(args):
             for batch in progress:
                 optimizer.zero_grad(set_to_none=True)
                 first, second = batch_inputs(batch, 1, device), batch_inputs(batch, 2, device)
-                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=precision != "fp32"):
-                    out1 = encoder(**first, output_hidden_states=True, return_dict=True)
-                    out2 = encoder(**second, output_hidden_states=True, return_dict=True)
-                    losses1 = alignment(out1.hidden_states, first["attention_mask"])
-                    losses2 = alignment(out2.hidden_states, second["attention_mask"])
-                    losses = {key: (losses1[key] + losses2[key]) / 2 for key in losses1}
-                    q = pool_hidden(out1.last_hidden_state, first["attention_mask"], args.pooling)
-                    p = pool_hidden(out2.last_hidden_state, second["attention_mask"], args.pooling)
-                    contrastive, _ = Matry_infonce(q, p, args.temperature, dims)
-                    loss = (0.4 * losses["total_loss"] + 0.6 * contrastive).float()
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Non-finite MIPIC loss.")
+                loss, losses, contrastive, forward_precision = stable_batch_loss(
+                    encoder, alignment, first, second, dims, args.pooling, args.temperature, precision, logger)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 encoder_grad_norm = torch.nn.utils.clip_grad_norm_(encoder.parameters(), args.max_grad_norm)
@@ -232,6 +265,7 @@ def train(args):
                 values.update(loss=float(loss.detach()), contrastive_loss=float(contrastive.detach()),
                               epoch=epoch + 1, step=epoch * steps_per_epoch + batches + 1,
                               optimizer_step=optimizer_steps, optimizer_skipped=optimizer_skipped,
+                              forward_precision=forward_precision, precision_retry=forward_precision != precision,
                               lr=optimizer.param_groups[0]["lr"], alignment_lr=optimizer.param_groups[1]["lr"],
                               batch_size=first["input_ids"].size(0), grad_scale=scaler.get_scale(),
                               grad_norm=float(grad_norm) if torch.isfinite(grad_norm) else None)
