@@ -9,10 +9,8 @@ fi
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-# "bert": {"model_name": "google-bert/bert-base-uncased"}
-# "tinybert": {"model_name": "huawei-noah/TinyBERT_General_6L_768D"}
-# "bgem3": {"model_name": "BAAI/bge-m3"}
-# "qwen": {"model_name": "Qwen/Qwen3-Embedding-0.6B"}
+# Models: bert=google-bert/bert-base-uncased; tinybert=huawei-noah/TinyBERT_General_6L_768D
+#         bgem3=BAAI/bge-m3; qwen=Qwen/Qwen3-Embedding-0.6B.
 
 MODEL_KEY="${MODEL_KEY:-bgem3}"
 DATA_PATH="${DATA_PATH:-./final-data/final_data.csv}"
@@ -21,25 +19,35 @@ DEVICE="${DEVICE:-cuda}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_EVAL="${RUN_EVAL:-1}"
 EVAL_WORK_DIR="${EVAL_WORK_DIR:-$PROJECT_DIR/MRL}"
+case "$RUN_EVAL" in
+    0|1) ;;
+    *) echo "RUN_EVAL must be 0 or 1." >&2; exit 2 ;;
+esac
+[[ "$OUTPUT_DIR" == /* ]] || OUTPUT_DIR="$PROJECT_DIR/$OUTPUT_DIR"
+[[ "$EVAL_WORK_DIR" == /* ]] || EVAL_WORK_DIR="$PROJECT_DIR/$EVAL_WORK_DIR"
 
 MODEL_ARGS=(--model_key "$MODEL_KEY")
 if [[ -n "${MODEL_NAME:-}" ]]; then
     MODEL_ARGS=(--model_name "$MODEL_NAME")
 fi
-[[ "$OUTPUT_DIR" == /* ]] || OUTPUT_DIR="$PROJECT_DIR/$OUTPUT_DIR"
+EXTRA_ARGS=()
+if [[ "${GRADIENT_CHECKPOINTING:-0}" == "1" ]]; then
+    EXTRA_ARGS+=(--gradient_checkpointing)
+fi
+if [[ -n "${WARMUP_STEPS:-}" ]]; then
+    EXTRA_ARGS+=(--warmup_steps "$WARMUP_STEPS")
+fi
 
 "$PYTHON_BIN" -u MRL/train.py \
     "${MODEL_ARGS[@]}" \
-    --data_path "$DATA_PATH" \
-    --output_dir "$OUTPUT_DIR" \
+    --data_path "$DATA_PATH" --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" --precision "${PRECISION:-auto}" \
-    --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-32}" --lr "${LR:-2e-5}" \
-    --max_length "${MAX_LENGTH:-256}"
-
-if [[ "$RUN_EVAL" == "1" ]]; then
-    (
-        cd "$EVAL_WORK_DIR"
-        "$PYTHON_BIN" -u "$PROJECT_DIR/MRL/eval.py" \
-            --checkpoint_dir "$OUTPUT_DIR" --device "$DEVICE"
-    ) 2>&1 | tee "$OUTPUT_DIR/eval.log"
-fi
+    --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-16}" --lr "${LR:-2e-5}" \
+    --max_length "${MAX_LENGTH:-256}" --seed "${SEED:-42}" \
+    --weight_decay "${WEIGHT_DECAY:-0.01}" --temperature "${TEMPERATURE:-0.07}" \
+    --max_grad_norm "${MAX_GRAD_NORM:-0.0}" \
+    --num_workers "${NUM_WORKERS:-2}" --log_every "${LOG_EVERY:-10}" \
+    --run_eval "$RUN_EVAL" --eval_work_dir "$EVAL_WORK_DIR" \
+    --eval_batch_size "${EVAL_BATCH_SIZE:-64}" \
+    --min_lr "${MIN_LR:-2e-6}" \
+    "${EXTRA_ARGS[@]}"

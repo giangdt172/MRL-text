@@ -34,6 +34,13 @@ def mean_pooling(model_output, attention_mask):
     return mean_embeddings
 
 
+def pool_embeddings(model, model_output, attention_mask):
+    # Old checkpoints explicitly saved mean pooling; new notebook runs use CLS.
+    if getattr(model, "embedding_pooling", "cls") == "mean":
+        return mean_pooling(model_output, attention_mask)
+    return model_output.last_hidden_state[:, 0, :]
+
+
 # ─────────────────────────────────────────────
 # STS evaluation
 # ─────────────────────────────────────────────
@@ -44,7 +51,7 @@ def eval_sts(model, eval_loader, matryoshka_dims):
     for dim in matryoshka_dims:
         preds, labels = [], []
 
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             with torch.no_grad():
                 for batch in tqdm(eval_loader, desc=f"Eval dim={dim}"):
                     input_ids1 = batch["input_ids1"].to(device)
@@ -56,8 +63,8 @@ def eval_sts(model, eval_loader, matryoshka_dims):
                     out1 = model(input_ids=input_ids1, attention_mask=attn1)
                     out2 = model(input_ids=input_ids2, attention_mask=attn2)
 
-                    emb1 = mean_pooling(out1, attn1)[:, :dim]
-                    emb2 = mean_pooling(out2, attn2)[:, :dim]
+                    emb1 = pool_embeddings(model, out1, attn1)[:, :dim]
+                    emb2 = pool_embeddings(model, out2, attn2)[:, :dim]
 
                     sim = F.cosine_similarity(emb1, emb2)
                     score = (sim + 1) * 2.5  # scale [-1,1] -> [0,5]
@@ -72,7 +79,7 @@ def eval_sts(model, eval_loader, matryoshka_dims):
     return results
 
 
-def eval_sts_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_sts_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval_sts_task')
@@ -81,7 +88,7 @@ def eval_sts_task(model, tokenizer, path_list, matryoshka_dims):
         eval_dataset = STSDataset(path)
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda x: collate_fn(x, tokenizer),
         )
@@ -98,7 +105,7 @@ def eval_cls(model, eval_loader, dim):
     preds, labels = [], []
     device = model.device
 
-    with torch.cuda.amp.autocast(dtype=torch.float16):
+    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
         with torch.no_grad():
             for batch in tqdm(eval_loader, desc=f"Extract dim={dim}"):
                 input_ids1 = batch["input_ids1"].to(device)
@@ -106,7 +113,7 @@ def eval_cls(model, eval_loader, dim):
                 label = batch["labels"]
 
                 out1 = model(input_ids=input_ids1, attention_mask=attn1)
-                emb1 = mean_pooling(out1, attn1)[:, :dim]
+                emb1 = pool_embeddings(model, out1, attn1)[:, :dim]
 
                 preds.extend(emb1.cpu().numpy())
                 labels.extend(label.numpy())
@@ -114,7 +121,7 @@ def eval_cls(model, eval_loader, dim):
     return preds, labels
 
 
-def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_classification_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval classifier')
@@ -127,7 +134,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
             eval_dataset = ClasssifyDataset(dev_path)
             eval_loader = DataLoader(
                 eval_dataset,
-                batch_size=64,
+                batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda x: clf_collate_fn(x, tokenizer),
             )
@@ -135,7 +142,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
             train_dataset = ClasssifyDataset(train_path)
             train_loader = DataLoader(
                 train_dataset,
-                batch_size=64,
+                batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda x: clf_collate_fn(x, tokenizer),
             )
@@ -187,7 +194,7 @@ def eval_pair(model, eval_loader, matryoshka_dims):
     for dim in matryoshka_dims:
         preds, labels = [], []
 
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             with torch.no_grad():
                 for batch in tqdm(eval_loader, desc=f"Eval dim={dim}"):
                     input_ids1 = batch["input_ids1"].to(device)
@@ -199,8 +206,8 @@ def eval_pair(model, eval_loader, matryoshka_dims):
                     out1 = model(input_ids=input_ids1, attention_mask=attn1)
                     out2 = model(input_ids=input_ids2, attention_mask=attn2)
 
-                    emb1 = mean_pooling(out1, attn1)[:, :dim]
-                    emb2 = mean_pooling(out2, attn2)[:, :dim]
+                    emb1 = pool_embeddings(model, out1, attn1)[:, :dim]
+                    emb2 = pool_embeddings(model, out2, attn2)[:, :dim]
 
                     sim = F.cosine_similarity(emb1, emb2)
                     score = (sim + 1) / 2
@@ -215,7 +222,7 @@ def eval_pair(model, eval_loader, matryoshka_dims):
     return results
 
 
-def eval_pair_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_pair_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval_pair_task')
@@ -224,7 +231,7 @@ def eval_pair_task(model, tokenizer, path_list, matryoshka_dims):
         eval_dataset = PairDataset(path)
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda x: collate_fn(x, tokenizer),
         )

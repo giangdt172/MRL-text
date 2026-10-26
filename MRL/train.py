@@ -1,5 +1,3 @@
-"""Single-GPU text embedding training with the Matryoshka InfoNCE objective."""
-
 import argparse
 import json
 import logging
@@ -33,14 +31,18 @@ def mean_pooling(hidden, attention_mask):
 
 
 def validate_args(args):
-    if args.epochs < 1 or args.batch_size < 2 or args.max_length < 1:
-        raise ValueError("epochs/max_length must be positive and batch_size must be at least two.")
+    if args.epochs < 1 or args.batch_size < 1 or args.max_length < 1:
+        raise ValueError("epochs, batch_size and max_length must be positive.")
     if not math.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("lr must be positive and finite.")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         raise ValueError("weight_decay must be nonnegative and finite.")
-    if not math.isfinite(args.max_grad_norm) or args.max_grad_norm <= 0:
-        raise ValueError("max_grad_norm must be positive and finite.")
+    if not math.isfinite(args.max_grad_norm) or args.max_grad_norm < 0:
+        raise ValueError("max_grad_norm must be nonnegative and finite (0 disables clipping).")
+    if not math.isfinite(args.min_lr) or not 0 <= args.min_lr <= args.lr:
+        raise ValueError("min_lr must be finite and between zero and lr.")
+    if args.num_workers < 0 or args.eval_batch_size < 1:
+        raise ValueError("num_workers must be nonnegative; eval_batch_size must be positive.")
     if not math.isfinite(args.temperature) or args.temperature <= 0:
         raise ValueError("temperature must be positive and finite.")
     if args.log_every < 1:
@@ -71,7 +73,7 @@ def resolve_device_precision(device_name=None, precision="auto", no_amp=False):
     if no_amp:
         precision = "fp32"
     if precision == "auto":
-        precision = ("bf16" if torch.cuda.is_bf16_supported() else "fp16") if device.type == "cuda" else "fp32"
+        precision = "fp16" if device.type == "cuda" else "fp32"
     if precision not in {"fp32", "fp16", "bf16"}:
         raise ValueError("precision must be auto, fp32, fp16, or bf16.")
     if device.type == "cpu" and precision != "fp32":
@@ -96,6 +98,9 @@ def configure_logging(output_dir):
 
 def train(args):
     validate_args(args)
+    if args.run_eval:
+        from MRL.eval import check_eval_data
+        check_eval_data(args.eval_work_dir)
     device, precision = resolve_device_precision(args.device, args.precision, args.no_amp)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -113,9 +118,7 @@ def train(args):
                 model_name, "mrl", args.data_path, output_dir)
     # Use the existing CSV mapping, two-view collator, and loader without changes.
     loader, tokenizer, _ = build_train_loader(
-        args.data_path, model_name, "pair_cls", args.max_length, args.batch_size)
-    if len(loader.dataset) < 2:
-        raise ValueError("Contrastive training needs at least two text examples.")
+        args.data_path, model_name, "pair_cls", args.max_length, args.batch_size, args.num_workers)
     encoder = AutoModel.from_pretrained(model_name).to(device)
     if args.gradient_checkpointing:
         encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -123,17 +126,18 @@ def train(args):
             encoder.config.use_cache = False
     model = encoder
     dims = resolve_dims(encoder.config.hidden_size, args.matryoshka_dims)
-    weights = [1 / len(dims)] * len(dims) if args.level_weights is None else args.level_weights
-    if (len(weights) != len(dims) or any(not math.isfinite(w) or w <= 0 for w in weights)
-            or not math.isclose(sum(weights), 1.0, abs_tol=1e-6)):
-        raise ValueError(f"level_weights must contain {len(dims)} positive weights summing to one.")
+    weights = [1.0] * len(dims) if args.level_weights is None else args.level_weights
+    if len(weights) != len(dims) or any(not math.isfinite(w) or w <= 0 for w in weights):
+        raise ValueError(f"level_weights must contain {len(dims)} positive finite weights.")
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    steps_per_epoch = len(loader) - int(len(loader.dataset) % args.batch_size == 1)
+    steps_per_epoch = len(loader)
     total_steps = steps_per_epoch * args.epochs
-    if not 0 <= args.warmup_steps <= total_steps:
+    warmup_steps = int(total_steps * 0.1) if args.warmup_steps is None else args.warmup_steps
+    if not 0 <= warmup_steps <= total_steps:
         raise ValueError("warmup_steps must be between zero and the total number of updates.")
-    scheduler = get_scheduler("cosine", optimizer=optimizer,
-                              num_warmup_steps=args.warmup_steps, num_training_steps=total_steps)
+    scheduler = get_scheduler("cosine_with_min_lr", optimizer=optimizer,
+                              num_warmup_steps=warmup_steps, num_training_steps=total_steps,
+                              scheduler_specific_kwargs={"min_lr": args.min_lr})
     amp_enabled = precision != "fp32"
     amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
@@ -145,12 +149,14 @@ def train(args):
     def encode(batch):
         first, second = batch_inputs(batch, 1, device), batch_inputs(batch, 2, device)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
-            q = mean_pooling(encoder(**first, return_dict=True).last_hidden_state, first["attention_mask"])
-            p = mean_pooling(encoder(**second, return_dict=True).last_hidden_state, second["attention_mask"])
+            q = encoder(**first, return_dict=True).last_hidden_state[:, 0, :]
+            p = encoder(**second, return_dict=True).last_hidden_state[:, 0, :]
         return q, p
 
     configuration = {**vars(args), "model_name": model_name, "matryoshka_dims": dims,
-                     "level_weights": weights, "loss_type": "mrl", "pooling": "mean",
+                     "level_weights": weights, "loss_type": "mrl", "pooling": "cls",
+                     "warmup_steps": warmup_steps, "scheduler": "cosine_with_min_lr",
+                     "loss_reduction": "sum", "singleton_batches": "keep",
                      "resolved_device": str(device), "resolved_precision": precision,
                      "torch_version": str(torch.__version__)}
     (output_dir / "training_config.json").write_text(json.dumps(configuration, indent=2) + "\n")
@@ -161,12 +167,11 @@ def train(args):
             progress = tqdm(loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
             loss_sum, batches, skipped_steps = 0.0, 0, 0
             for batch in progress:
-                # A singleton tail supplies no in-batch negative and has zero CE.
-                if batch["input_ids1_stu"].size(0) < 2:
-                    continue
                 optimizer.zero_grad(set_to_none=True)
-                q, p = encode(batch)
-                loss, logits = Matry_infonce(q, p, args.temperature, dims, level_weights=weights)
+                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                    q, p = encode(batch)
+                    loss, logits = Matry_infonce(q, p, args.temperature, dims, level_weights=weights)
+                    loss = loss.float()
                 target = torch.arange(q.size(0), device=device)
                 metrics = {f"loss_dim_{dim}": torch.nn.functional.cross_entropy(
                     logits[f"dim_{dim}"].detach(), target) for dim in dims}
@@ -175,7 +180,11 @@ def train(args):
                     raise FloatingPointError("Non-finite encoder loss.")
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(encoder.parameters(), args.max_grad_norm)
+                if args.max_grad_norm:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(encoder.parameters(), args.max_grad_norm)
+                else:
+                    grad_norm = torch.stack([p.grad.detach().float().norm() for p in encoder.parameters()
+                                             if p.grad is not None]).norm()
                 if not scaler.is_enabled() and not torch.isfinite(grad_norm):
                     raise FloatingPointError("Non-finite encoder gradients; try --precision fp32 or a lower learning rate.")
                 previous_scale = scaler.get_scale()
@@ -183,12 +192,13 @@ def train(args):
                 scaler.update()
                 optimizer_skipped = scaler.get_scale() < previous_scale
                 if not optimizer_skipped:
-                    scheduler.step()
                     optimizer_steps += 1
                 else:
                     skipped_steps += 1
+                scheduler.step()  # Notebook advances the schedule for every batch.
                 values = {key: float(value) for key, value in metrics.items()}
                 values.update(loss=float(loss.detach()), epoch=epoch + 1, step=epoch * steps_per_epoch + batches + 1,
+                              batch_size=q.size(0),
                               optimizer_step=optimizer_steps, optimizer_skipped=optimizer_skipped,
                               lr=optimizer.param_groups[0]["lr"], grad_scale=scaler.get_scale(),
                               grad_norm=float(grad_norm) if torch.isfinite(grad_norm) else None)
@@ -205,6 +215,10 @@ def train(args):
             tokenizer.save_pretrained(output_dir)
             logger.info("Epoch %d complete | mean_loss=%.6f | skipped optimizer steps=%d | saved %s",
                         epoch + 1, loss_sum / max(batches, 1), skipped_steps, output_dir)
+            if args.run_eval:
+                from MRL.eval import evaluate_model
+                evaluate_model(encoder, tokenizer, dims, output_dir, epoch=epoch + 1,
+                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
     return model
 
 
@@ -219,21 +233,26 @@ def parse_args(argv=None):
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--warmup_steps", type=int, default=0)
+    parser.add_argument("--warmup_steps", type=int, default=None, help="Default: 10%% of all batches")
+    parser.add_argument("--min_lr", type=float, default=2e-6)
     parser.add_argument("--max_length", type=int, default=256)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--max_grad_norm", type=float, default=0.0, help="Notebook disables clipping")
     parser.add_argument("--matryoshka_dims", type=int, nargs="+", default=None,
                         help="Prefix dimensions in ascending level weights order; hidden_size is always included")
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--level_weights", type=float, nargs="+", default=None,
-                        help="Positive weights summing to one, in ascending dimension order; default is uniform")
+                        help="Positive weights in ascending dimension order; default is all ones (sum)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, help="cuda, cuda:N, or cpu; default selects CUDA when available")
     parser.add_argument("--precision", choices=["auto", "fp32", "fp16", "bf16"], default="auto",
-                        help="auto selects BF16 on supported GPUs, otherwise FP16; CPU uses FP32")
+                        help="auto matches notebook CUDA FP16; CPU uses FP32")
     parser.add_argument("--no_amp", action="store_true", help="Compatibility alias for --precision fp32")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Reduce encoder activation memory")
     parser.add_argument("--log_every", type=int, default=10, help="Flush metrics and log progress every N batches")
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate every epoch")
+    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent))
+    parser.add_argument("--eval_batch_size", type=int, default=64)
     return parser.parse_args(argv)
 
 

@@ -136,7 +136,7 @@ def train(args):
     model = FlagTextModel(encoder, projector)
     criterion = LOSS_TYPES[args.loss_type](
         projector, temperature=args.temperature, update_every=args.flag_update_every,
-        level_weights=args.flag_level_weights, lambda_cross=args.flag_lambda_cross,
+        lambda_cross=args.flag_lambda_cross,
         far_mode=args.flag_far_mode, far_tau=args.flag_far_tau).to(device)
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = len(loader) - int(len(loader.dataset) % args.batch_size == 1)
@@ -257,7 +257,6 @@ def parse_args(argv=None):
                         help="Negative cosine weight for flag_mrl; unused by flag_mrl_trace_ratio")
     parser.add_argument("--flag_retraction", choices=["svd", "newton_schulz"], default="svd")
     parser.add_argument("--flag_update_every", type=int, default=1)
-    parser.add_argument("--flag_level_weights", type=float, nargs="+", default=None)
     parser.add_argument("--flag_lambda_cross", type=float, default=0.0)
     parser.add_argument("--flag_far_mode", choices=["uniform", "hard"], default="uniform")
     parser.add_argument("--flag_far_tau", type=float, default=0.1)

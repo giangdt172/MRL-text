@@ -101,7 +101,7 @@ class FlagProjector(nn.Module):
 class FlagMRLLoss(nn.Module):
     flag_objective = "spherical"
 
-    def __init__(self, projector, temperature=0.07, update_every=1, level_weights=None,
+    def __init__(self, projector, temperature=0.07, update_every=1,
                  lambda_cross=0.0, far_mode="uniform", far_tau=0.1):
         super().__init__()
         if not math.isfinite(temperature) or temperature <= 0:
@@ -112,13 +112,8 @@ class FlagMRLLoss(nn.Module):
             raise ValueError("lambda_cross must be nonnegative and finite.")
         if far_mode not in {"uniform", "hard"} or not math.isfinite(far_tau) or far_tau <= 0:
             raise ValueError("Invalid negative weighting mode or temperature.")
-        count = len(projector.dims)
-        weights = [1 / count] * count if level_weights is None else list(level_weights)
-        if (len(weights) != count or any(not math.isfinite(w) or w <= 0 for w in weights)
-                or not math.isclose(sum(weights), 1.0, abs_tol=1e-6)):
-            raise ValueError(f"level_weights must contain {count} positive weights summing to one.")
         self.projector, self.temperature = projector, temperature
-        self.update_every, self.weights = update_every, weights
+        self.update_every = update_every
         self.lambda_cross, self.far_mode, self.far_tau = lambda_cross, far_mode, far_tau
         self.register_buffer("step_idx", torch.zeros((), dtype=torch.long))
 
@@ -141,7 +136,7 @@ class FlagMRLLoss(nn.Module):
             basis = self.projector.U.detach().clone()
             loss, encoder_metrics = encoder_losses(
                 q.float() @ basis, p.float() @ basis, target, self.projector.dims,
-                self.weights, self.temperature, lambda_cross=self.lambda_cross)
+                self.temperature, lambda_cross=self.lambda_cross)
         if self.training:
             self.step_idx.add_(1)
         return loss, {**metrics, **encoder_metrics}

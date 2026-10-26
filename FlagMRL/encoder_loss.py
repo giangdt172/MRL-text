@@ -38,7 +38,7 @@ def _cross_dim_pair(log_small, log_large, target):
     return loss, metrics
 
 
-def encoder_losses(q, p, target, dims, weights, temperature, *, lambda_cross=0.0):
+def encoder_losses(q, p, target, dims, temperature, *, lambda_cross=0.0):
     """Inputs are unnormalized coordinates X @ U, including the full level.
 
     Compute each coordinate block's dot products and squared norms once. Their
@@ -53,7 +53,7 @@ def encoder_losses(q, p, target, dims, weights, temperature, *, lambda_cross=0.0
     previous = 0
     previous_log = None
     prefix_dot = prefix_q_squared = prefix_p_squared = None
-    for dim, weight in zip(dims, weights):
+    for dim in dims:
         q_block, p_block = q[:, previous:dim], p[:, previous:dim]
         block_dot = q_block @ p_block.T
         block_q_squared = q_block.square().sum(dim=-1)
@@ -78,7 +78,8 @@ def encoder_losses(q, p, target, dims, weights, temperature, *, lambda_cross=0.0
         else:
             # Preserve the original fused CE path when KD is disabled.
             level_loss = F.cross_entropy(logits, target)
-        mrl_loss = mrl_loss + weight * level_loss
+        # Each dimension contributes one InfoNCE term, with fixed coefficient 1.
+        mrl_loss = mrl_loss + level_loss
         metrics[f"loss_dim_{dim}"] = level_loss.detach()
         metrics[f"contrastive_loss_dim_{dim}"] = level_loss.detach()
 

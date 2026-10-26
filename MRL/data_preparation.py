@@ -216,6 +216,7 @@ def build_train_loader(
     task_type: str = "pair_cls",
     max_length: int = 256,
     batch_size: int = 16,
+    num_workers: int = 2,
 ):
     df = pd.read_csv(data_path)
 
@@ -236,9 +237,9 @@ def build_train_loader(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate,
-        pin_memory=True,
-        num_workers=2,
-        persistent_workers=True,
+        pin_memory=torch.cuda.is_available(),
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
     )
 
     print(f"Done Prepare Dataloader — {len(train_ds)} samples, {len(train_loader)} batches")

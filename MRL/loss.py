@@ -1,5 +1,3 @@
-"""Matryoshka prefix InfoNCE, without a learned flag projection."""
-
 import math
 
 import torch
@@ -23,24 +21,23 @@ def info_nce(q, k, temperature=0.07):
     """One-way in-batch InfoNCE with diagonal positive pairs."""
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError("temperature must be positive and finite.")
-    logits = F.normalize(q.float(), dim=-1) @ F.normalize(k.float(), dim=-1).T / temperature
+    logits = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).T / temperature
     labels = torch.arange(q.size(0), device=q.device)
     return F.cross_entropy(logits, labels), logits
 
 
 def Matry_infonce(a, b, temperature=0.07, nested_dims=None, *, level_weights=None):
-    """Sum prefix losses, or use explicit weights (uniform during training, as in FlagMRL)."""
+    """Sum prefix InfoNCE as in the notebook; explicit weights are optional overrides."""
     if a.ndim != 2 or a.shape != b.shape or a.size(0) < 1:
         raise ValueError("a and b must have the same nonempty [batch, hidden_size] shape.")
     dims = resolve_dims(a.size(1), nested_dims)
     weights = [1.0] * len(dims) if level_weights is None else list(level_weights)
     if len(weights) != len(dims) or any(not math.isfinite(w) or w <= 0 for w in weights):
         raise ValueError("Provide one positive finite weight per resolved dimension.")
-    total_loss = a.new_zeros((), dtype=torch.float32)
+    total_loss = 0.0
     all_logits = {}
-    with torch.autocast(device_type=a.device.type, enabled=False):
-        for dim, weight in zip(dims, weights):
-            loss, logits = info_nce(a[:, :dim], b[:, :dim], temperature)
-            total_loss = total_loss + weight * loss
-            all_logits[f"dim_{dim}"] = logits
+    for dim, weight in zip(dims, weights):
+        loss, logits = info_nce(a[:, :dim], b[:, :dim], temperature)
+        total_loss = total_loss + weight * loss
+        all_logits[f"dim_{dim}"] = logits
     return total_loss, all_logits
