@@ -248,8 +248,8 @@ def parse_args(argv=None):
     parser.add_argument("--matryoshka_dims", type=int, nargs="+", default=None,
                         help="Ascending level weights order; hidden_size is always included")
     parser.add_argument("--temperature", type=float, default=0.07)
-    parser.add_argument("--flag_init", choices=["random", "identity", "spherical"], default="random",
-                        help="spherical warms up the basis with the selected loss_type objective")
+    parser.add_argument("--flag_init", choices=["random", "identity", "spherical"], default="identity",
+                        help="identity starts at U=I; spherical warms up the basis with the selected loss_type objective")
     parser.add_argument("--flag_init_batches", type=int, default=8)
     parser.add_argument("--flag_lr", type=float, default=0.1)
     parser.add_argument("--flag_eps", type=float, default=1e-4)

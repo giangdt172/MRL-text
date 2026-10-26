@@ -53,7 +53,7 @@ fi
     --device "$DEVICE" --precision "${PRECISION:-auto}" \
     --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-32}" --lr "${LR:-2e-5}" \
     --max_length "${MAX_LENGTH:-256}" \
-    --flag_init "${FLAG_INIT:-random}" --flag_lr "${FLAG_LR:-0.1}" \
+    --flag_init "${FLAG_INIT:-identity}" --flag_lr "${FLAG_LR:-0.1}" \
     --flag_update_every "${FLAG_UPDATE_EVERY:-1}" \
     --flag_retraction "${FLAG_RETRACTION:-svd}" \
     --flag_lambda_cross "${FLAG_LAMBDA_CROSS:-0.0}"

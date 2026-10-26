@@ -30,7 +30,7 @@ class FlagProjector(nn.Module):
     Flag objectives use x @ U @ diag(sqrt(a)); encoder loss uses x @ U.
     """
 
-    def __init__(self, full_dim, dims=None, init="random", lr=0.1, eps=1e-4,
+    def __init__(self, full_dim, dims=None, init="identity", lr=0.1, eps=1e-4,
                  lambda_neg=1.0, retraction="svd", seed=42):
         super().__init__()
         self.dims = resolve_dims(full_dim, dims)
