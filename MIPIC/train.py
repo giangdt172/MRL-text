@@ -149,7 +149,11 @@ def train(args):
     logger.info("Model: %s | device: %s | precision: %s | output: %s", model_name, device, precision, output_dir)
     loader, tokenizer, _ = build_train_loader(
         args.data_path, model_name, "pair_cls", args.max_length, args.batch_size, args.num_workers)
-    encoder = AutoModel.from_pretrained(model_name).to(device)
+    # AMP controls forward precision; optimizer parameters/gradients stay FP32.
+    # Checkpoints (notably Qwen) may otherwise load native BF16 weights, which
+    # CUDA GradScaler cannot unscale on some PyTorch versions.
+    encoder = AutoModel.from_pretrained(model_name, torch_dtype=torch.float32).to(
+        device=device, dtype=torch.float32)
     if args.gradient_checkpointing:
         encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     if hasattr(encoder.config, "use_cache"):
@@ -158,7 +162,7 @@ def train(args):
     alignment = TotalAlignmentLoss(
         d_full=encoder.config.hidden_size, matryoshka_dims=dims, align_layers=layers,
         pipeline_pairs=pipes, alpha=0.4, beta=0.4, gamma=0.2,
-        base_k=args.base_k, d_att=args.d_att).to(device)
+        base_k=args.base_k, d_att=args.d_att).to(device=device, dtype=torch.float32)
     optimizer = torch.optim.AdamW([
         {"params": encoder.parameters(), "lr": args.lr},
         {"params": alignment.parameters(), "lr": args.lr * 2},
@@ -169,8 +173,10 @@ def train(args):
     # directly, without creating an unused optimizer/scheduler or its warnings.
     if args.warmup_steps not in {None, 0}:
         raise ValueError("Notebook MIPIC training uses constant LR; warmup_steps must be 0.")
-    scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and precision == "fp16")
     amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    logger.info("Parameter dtype: %s | autocast: %s | GradScaler enabled: %s",
+                next(encoder.parameters()).dtype, precision, scaler.is_enabled())
     configuration = {
         **vars(args), "model_name": model_name, "matryoshka_dims": dims,
         "align_layers": layers, "pipeline_pairs": pipes, "warmup_steps": 0,
@@ -178,6 +184,7 @@ def train(args):
         "attention_kl_enabled": False, "cka_dtype": "float64", "selected_padding": "keep",
         "gradient_clipping": "separate_encoder_alignment", "singleton_batches": "keep",
         "loss_type": "mipic", "resolved_device": str(device), "resolved_precision": precision,
+        "parameter_dtype": "float32", "grad_scaler_enabled": scaler.is_enabled(),
         "torch_version": str(torch.__version__),
     }
     (output_dir / "training_config.json").write_text(json.dumps(configuration, indent=2) + "\n")

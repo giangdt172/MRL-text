@@ -42,7 +42,7 @@ fi
     "${MODEL_ARGS[@]}" \
     --data_path "$DATA_PATH" --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" --precision "${PRECISION:-auto}" \
-    --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-16}" --lr "${LR:-2e-5}" \
+    --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-32}" --lr "${LR:-2e-5}" \
     --max_length "${MAX_LENGTH:-256}" --seed "${SEED:-42}" \
     --weight_decay "${WEIGHT_DECAY:-0.01}" --temperature "${TEMPERATURE:-0.07}" \
     --max_grad_norm "${MAX_GRAD_NORM:-0.0}" \
