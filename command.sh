@@ -2,7 +2,7 @@
 set -e
 
 # Edit the settings below, then run: bash command.sh
-# Each method finishes training, then evaluates the saved checkpoint.
+# Each method evaluates after every training epoch.
 cd "$(dirname "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$PWD"
 
@@ -21,16 +21,16 @@ OUTPUT_DIR="$PROJECT_DIR/checkpoints/$METHOD/$CKPT_NAME"
 MRL_EVAL_WORK_DIR="$PROJECT_DIR/MRL"
 MIPIC_EVAL_WORK_DIR="$PROJECT_DIR/MIPIC"
 FLAG_EVAL_WORK_DIR="$PROJECT_DIR/FlagMRL"
-EVAL_BATCH_SIZE=64  # MRL/MIPIC; FlagMRL currently uses a fixed batch size of 64.
+EVAL_BATCH_SIZE=64
 
 COMMON_ARGS=(
     --model_name "$MODEL_NAME"
     --data_path "$DATA_PATH"
     --output_dir "$OUTPUT_DIR"
     --device "$DEVICE" --precision auto
-    --epochs 5 --batch_size 32 --lr 2e-5
+    --epochs 8 --batch_size 64 --lr 2e-5
     --max_length 256 --seed 42
-    --weight_decay 0.01 --temperature 0.05
+    --weight_decay 0.01 --temperature 0.07
     --log_every 10
     # --matryoshka_dims 16 32 64 128 256 512
     # --gradient_checkpointing
@@ -66,26 +66,18 @@ FLAG_ARGS=(
 )
 
 mrl() {
-    "$PYTHON_BIN" -u MRL/train.py "${COMMON_ARGS[@]}" "${MRL_ARGS[@]}" --run_eval 0
-    "$PYTHON_BIN" -u MRL/eval.py \
-        --checkpoint_dir "$OUTPUT_DIR" --device "$DEVICE" \
-        --eval_work_dir "$MRL_EVAL_WORK_DIR" --batch_size "$EVAL_BATCH_SIZE"
+    "$PYTHON_BIN" -u MRL/train.py "${COMMON_ARGS[@]}" "${MRL_ARGS[@]}" \
+        --run_eval 1 --eval_work_dir "$MRL_EVAL_WORK_DIR" --eval_batch_size "$EVAL_BATCH_SIZE"
 }
 
 mipic() {
-    "$PYTHON_BIN" -u MIPIC/train.py "${COMMON_ARGS[@]}" "${MIPIC_ARGS[@]}" --run_eval 0
-    "$PYTHON_BIN" -u MIPIC/eval.py \
-        --checkpoint_dir "$OUTPUT_DIR" --device "$DEVICE" \
-        --eval_work_dir "$MIPIC_EVAL_WORK_DIR" --batch_size "$EVAL_BATCH_SIZE"
+    "$PYTHON_BIN" -u MIPIC/train.py "${COMMON_ARGS[@]}" "${MIPIC_ARGS[@]}" \
+        --run_eval 1 --eval_work_dir "$MIPIC_EVAL_WORK_DIR" --eval_batch_size "$EVAL_BATCH_SIZE"
 }
 
 flag_mrl() {
-    "$PYTHON_BIN" -u FlagMRL/train.py "${COMMON_ARGS[@]}" "${FLAG_ARGS[@]}"
-    (
-        cd "$FLAG_EVAL_WORK_DIR"
-        "$PYTHON_BIN" -u "$PROJECT_DIR/FlagMRL/eval.py" \
-            --checkpoint_dir "$OUTPUT_DIR" --device "$DEVICE"
-    )
+    "$PYTHON_BIN" -u FlagMRL/train.py "${COMMON_ARGS[@]}" "${FLAG_ARGS[@]}" \
+        --run_eval 1 --eval_work_dir "$FLAG_EVAL_WORK_DIR" --eval_batch_size "$EVAL_BATCH_SIZE"
 }
 
 "$METHOD"

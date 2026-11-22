@@ -15,7 +15,7 @@ from sklearn.metrics import (accuracy_score, f1_score, precision_score,
                               recall_score, average_precision_score)
 from sklearn.linear_model import LogisticRegression
 
-from data_preparation import (
+from FlagMRL.data_preparation import (
     STSDataset, ClasssifyDataset, PairDataset,
     collate_fn, clf_collate_fn,
 )
@@ -72,7 +72,7 @@ def eval_sts(model, eval_loader, matryoshka_dims):
     return results
 
 
-def eval_sts_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_sts_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval_sts_task')
@@ -81,7 +81,7 @@ def eval_sts_task(model, tokenizer, path_list, matryoshka_dims):
         eval_dataset = STSDataset(path)
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda x: collate_fn(x, tokenizer),
         )
@@ -114,7 +114,7 @@ def eval_cls(model, eval_loader, dim):
     return preds, labels
 
 
-def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_classification_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval classifier')
@@ -127,7 +127,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
             eval_dataset = ClasssifyDataset(dev_path)
             eval_loader = DataLoader(
                 eval_dataset,
-                batch_size=64,
+                batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda x: clf_collate_fn(x, tokenizer),
             )
@@ -135,7 +135,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
             train_dataset = ClasssifyDataset(train_path)
             train_loader = DataLoader(
                 train_dataset,
-                batch_size=64,
+                batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda x: clf_collate_fn(x, tokenizer),
             )
@@ -215,7 +215,7 @@ def eval_pair(model, eval_loader, matryoshka_dims):
     return results
 
 
-def eval_pair_task(model, tokenizer, path_list, matryoshka_dims):
+def eval_pair_task(model, tokenizer, path_list, matryoshka_dims, batch_size=64):
     task_results = {}
     model.eval()
     print(' ✅ eval_pair_task')
@@ -224,7 +224,7 @@ def eval_pair_task(model, tokenizer, path_list, matryoshka_dims):
         eval_dataset = PairDataset(path)
         eval_loader = DataLoader(
             eval_dataset,
-            batch_size=64,
+            batch_size=batch_size,
             shuffle=False,
             collate_fn=lambda x: collate_fn(x, tokenizer),
         )

@@ -53,6 +53,8 @@ def validate_args(args):
         raise ValueError("Flag warmup requires flag_init_batches >= 1.")
     if args.log_every < 1:
         raise ValueError("log_every must be positive.")
+    if args.eval_batch_size < 1:
+        raise ValueError("eval_batch_size must be positive.")
     if args.no_amp and args.precision not in {"auto", "fp32"}:
         raise ValueError("--no_amp cannot be combined with --precision fp16/bf16.")
     data_path = Path(args.data_path).expanduser().resolve()
@@ -227,6 +229,12 @@ def train(args):
             model.save_pretrained(output_dir, tokenizer)
             logger.info("Epoch %d complete | mean_loss=%.6f | skipped optimizer steps=%d | saved %s",
                         epoch + 1, loss_sum / max(batches, 1), skipped_steps, output_dir)
+            if args.run_eval:
+                from FlagMRL.eval import evaluate_model
+                optimizer.zero_grad(set_to_none=True)
+                logger.info("Evaluating epoch %d", epoch + 1)
+                evaluate_model(model, tokenizer, projector.dims, output_dir, epoch=epoch + 1,
+                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
     return model
 
 
@@ -270,6 +278,9 @@ def parse_args(argv=None):
     parser.add_argument("--no_amp", action="store_true", help="Compatibility alias for --precision fp32")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Reduce encoder activation memory")
     parser.add_argument("--log_every", type=int, default=10, help="Flush metrics and log progress every N batches")
+    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate after every epoch")
+    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent))
+    parser.add_argument("--eval_batch_size", type=int, default=64)
     return parser.parse_args(argv)
 
 
