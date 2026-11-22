@@ -93,6 +93,10 @@ def test_real_mteb_selected_tasks_results_and_rng_restoration(encoder_dir, offli
         assert (tmp_path / path).is_file()
     assert json.loads((tmp_path / "result_epoch_1.json").read_text()) == result
     assert (tmp_path / "summary_epoch_1.txt").is_file()
+    assert result["metrics"] == {"STSBenchmark": "cosine_spearman"}
+    assert (tmp_path / "results.csv").is_file()
+    assert (tmp_path / "results_long.csv").is_file()
+    assert "| 1 | cosine_spearman |" in (tmp_path / "summary_all_epochs.txt").read_text()
 
 
 def test_mteb_failure_restores_training_mode_and_rng(encoder_dir, offline_mteb, monkeypatch, tmp_path):
@@ -134,10 +138,11 @@ def test_training_epoch_uses_mteb_and_checkpoint_reloads(method, encoder_dir, pa
 
 
 @pytest.mark.parametrize("method", ["MRL", "MIPIC", "FlagMRL", "ESE"])
-def test_default_eval_uses_only_selected_preset(method):
+def test_default_eval_uses_only_selected_preset(method, pairs_csv):
     module = importlib.import_module(f"{method}.train")
     args = module.parse_args(["--model_key", "bert"])
     assert args.run_eval == 1 and tuple(args.eval_tasks) == DEFAULT_EVAL_TASKS
+    args.data_path = str(pairs_csv)
     module.validate_args(args)
     override = module.parse_args(["--model_key", "bert", "--eval_tasks", "STSBenchmark", "SICK-R"])
     assert override.eval_tasks == ["STSBenchmark", "SICK-R"]

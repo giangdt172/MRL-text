@@ -185,8 +185,7 @@ def train(args):
                 args.data_path or DATASET_NAME, args.eval_tasks, bool(args.run_eval))
     loader, tokenizer = build_train_loader(
         args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
-        seed=args.seed, max_train_samples=args.max_train_samples,
-        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+        seed=args.seed, max_train_samples=args.max_train_samples)
     logger.info("Training pairs: %s", loader.dataset.metadata)
     # AMP controls forward precision; optimizer parameters/gradients stay FP32.
     # Checkpoints (notably Qwen) may otherwise load native BF16 weights, which

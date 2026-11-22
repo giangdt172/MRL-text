@@ -2,13 +2,16 @@
 
 import importlib
 import json
+import os
+from pathlib import Path
+import subprocess
 
 import pandas as pd
 import pytest
 import torch
 from torch.nn import functional as F
 
-from common.data_preparation import PositivePairDataset, build_train_loader, load_training_pairs
+from common.data_preparation import DEFAULT_TRAIN_DATA_PATH, PositivePairDataset, build_train_loader, load_training_pairs
 from common.loss import info_nce
 
 
@@ -42,25 +45,57 @@ def test_reject_invalid_or_single_text_data(frame):
         PositivePairDataset(frame)
 
 
-def test_hub_uses_only_pair_train_without_oversampling(monkeypatch):
-    from datasets import Dataset
+def test_default_pairs_are_local_and_do_not_download(monkeypatch, pairs_csv):
+    monkeypatch.setattr("common.data_preparation.DEFAULT_TRAIN_DATA_PATH", pairs_csv)
 
-    raw = Dataset.from_dict({"anchor": ["a", "b", "c"], "positive": ["A", "B", "C"]})
-    calls = []
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("Training must read the local CSV without contacting the Hub.")
 
-    def load(*args, **kwargs):
-        calls.append((args, kwargs))
-        return raw
-
-    monkeypatch.setattr("datasets.load_dataset", load)
-    pairs = load_training_pairs(data_cache_dir="/tmp/quora-test-cache", dataset_revision="test-commit")
-    assert calls == [(("sentence-transformers/quora-duplicates", "pair"),
-                      {"split": "train", "cache_dir": "/tmp/quora-test-cache", "revision": "test-commit"})]
-    assert len(pairs) == 3 and not pairs.metadata["oversampled"]
-    assert pairs[0] == ("a", "A")
-    smaller = PositivePairDataset(raw.to_pandas(), max_train_samples=2, seed=9)
-    repeat = PositivePairDataset(raw.to_pandas(), max_train_samples=2, seed=9)
+    monkeypatch.setattr("datasets.load_dataset", unexpected_download)
+    pairs = load_training_pairs()
+    assert len(pairs) == 7 and not pairs.metadata["oversampled"]
+    assert pairs[0] == ("good", "good day sun")
+    assert pairs.metadata["path"] == str(pairs_csv.resolve())
+    smaller = load_training_pairs(max_train_samples=2, seed=9)
+    repeat = load_training_pairs(max_train_samples=2, seed=9)
     assert len(smaller) == 2 and smaller.pairs == repeat.pairs
+
+
+def test_missing_local_pairs_explain_download_step(tmp_path):
+    with pytest.raises(FileNotFoundError, match="bash download.sh"):
+        load_training_pairs(tmp_path / "missing.csv")
+
+
+def test_download_script_writes_inside_project_from_any_directory(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "download.sh"
+    script.write_text((Path(__file__).resolve().parent.parent / "download.sh").read_text())
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "datasets.py").write_text('''import csv
+import os
+from pathlib import Path
+
+def load_dataset(name, config, split):
+    assert (name, config, split) == ("sentence-transformers/quora-duplicates", "pair", "train")
+    assert Path(os.environ["HF_HOME"]) == Path.cwd() / "data" / ".cache" / "huggingface"
+    assert Path(os.environ["HF_DATASETS_CACHE"]) == Path(os.environ["HF_HOME"]) / "datasets"
+    assert Path(os.environ["HF_HUB_CACHE"]) == Path(os.environ["HF_HOME"]) / "hub"
+    return LocalDataset()
+
+class LocalDataset:
+    def to_csv(self, path, index):
+        assert index is False
+        with open(path, "w", newline="") as stream:
+            csv.writer(stream).writerows([("anchor", "positive"), ("a", "A"), ("b", "B")])
+''')
+    subprocess.run(["bash", str(script)], cwd=tmp_path, check=True,
+                   env={**os.environ, "PYTHONPATH": str(stub), "HF_DATASETS_CACHE": "/tmp/outside-datasets",
+                        "HF_HUB_CACHE": "/tmp/outside-hub"})
+    pairs = load_training_pairs(project / "data" / "quora-duplicates-pair.csv")
+    assert pairs.pairs == [("a", "A"), ("b", "B")]
+    assert not (tmp_path / "data").exists()
 
 
 def test_common_infonce_preserves_losses_and_gradients():
@@ -115,8 +150,10 @@ def test_all_trainers_use_pairs_and_save_checkpoints(method, encoder_dir, pairs_
 
 
 @pytest.mark.parametrize("method", ["MRL", "MIPIC", "FlagMRL", "ESE"])
-def test_each_cli_defaults_to_hub_pairs(method):
+def test_each_cli_defaults_to_project_pairs(method, pairs_csv):
     module = importlib.import_module(f"{method}.train")
     args = module.parse_args(["--model_key", "bert", "--run_eval", "0"])
+    assert Path(args.data_path) == DEFAULT_TRAIN_DATA_PATH
+    args.data_path = str(pairs_csv)
     module.validate_args(args)
-    assert args.data_path is None and args.max_train_samples == 150_000
+    assert args.data_path == str(pairs_csv.resolve()) and args.max_train_samples == 150_000

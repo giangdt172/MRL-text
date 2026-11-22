@@ -1,6 +1,7 @@
 /final-data
 /multitask-data
 /sts-data
+/data/
 __pycache__
 /logs
 .pytest_cache

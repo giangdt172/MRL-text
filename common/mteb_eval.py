@@ -17,6 +17,7 @@ from torch.nn import functional as F
 from transformers import AutoModel, AutoTokenizer
 
 from common.mteb_tasks import DEFAULT_EVAL_TASKS
+from common.mteb_results import format_score, write_result_summaries
 
 
 def add_eval_args(parser, *, training=False):
@@ -126,7 +127,7 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
                "model_name": getattr(model.config, "_name_or_path", ""), "output_dir": str(directory),
                "tasks": [], "eval_splits": splits,
                "eval_languages": languages, "matryoshka_dims": dims, "pooling": pooling,
-               "max_length": max_length, "seed": seed, "scores": {}, "raw_results": {}}
+               "max_length": max_length, "seed": seed, "metrics": {}, "scores": {}, "raw_results": {}}
     was_training = model.training
     python_state, numpy_state = random.getstate(), np.random.get_state()
     try:
@@ -144,6 +145,7 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
                 # Fresh task instances also reset MTEB's task-local sampling RNGs.
                 tasks = [mteb.get_task(name, eval_splits=splits, languages=languages) for name in names]
                 results["tasks"] = [task.metadata.name for task in tasks]
+                results["metrics"] = {task.metadata.name: task.metadata.main_score for task in tasks}
                 adapter = MatryoshkaEncoder(model, tokenizer, dim, pooling=pooling,
                                             max_length=max_length, batch_size=batch_size)
                 adapter.mteb_model_meta = ModelMeta.create_empty(overwrites={
@@ -164,17 +166,20 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
         random.setstate(python_state)
         np.random.set_state(numpy_state)
     suffixes = [""] + ([f"_epoch_{epoch}"] if epoch is not None else [])
-    rows = ["| Task | " + " | ".join(str(dim) for dim in dims) + " |",
-            "| --- | " + " | ".join("---:" for _ in dims) + " |"]
+    rows = ["| Task | Metric | " + " | ".join(str(dim) for dim in dims) + " |",
+            "| --- | --- | " + " | ".join("---:" for _ in dims) + " |"]
     for name in results["tasks"]:
-        rows.append("| " + name + " | " + " | ".join(
-            f"{results['scores'][f'dim_{dim}'][name]:.4f}" for dim in dims) + " |")
-    summary = "MTEB main_score by embedding dimension\n\n" + "\n".join(rows) + "\n"
+        rows.append("| " + name + " | " + results["metrics"][name] + " | " + " | ".join(
+            format_score(results["scores"][f"dim_{dim}"][name]) for dim in dims) + " |")
+    label = f"epoch {epoch}" if epoch is not None else "standalone evaluation"
+    summary = f"MTEB main_score by embedding dimension ({label})\n\n" + "\n".join(rows) + "\n"
     for suffix in suffixes:
         write_json(directory / f"result{suffix}.json", results)
         (directory / f"summary{suffix}.txt").write_text(summary)
+    write_result_summaries(directory)
     print(summary)
     print(f"MTEB results: {directory / 'result.json'}")
+    print(f"All epochs: {directory / 'summary_all_epochs.txt'} | CSV: {directory / 'results.csv'}")
     return json_safe(results)
 
 

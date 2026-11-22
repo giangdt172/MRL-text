@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 # ── Configurable defaults ──────────────────────────────────────────────────
-# Empty DATA_PATH loads Quora pair/train from Hugging Face.
+# Empty DATA_PATH uses project data/quora-duplicates-pair.csv from download.sh.
 DATA_PATH="${DATA_PATH:-}"
 DATA_ARGS=(--max_train_samples "${MAX_TRAIN_SAMPLES:-150000}")
 

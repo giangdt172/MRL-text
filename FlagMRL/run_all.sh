@@ -14,7 +14,7 @@ cd "$PROJECT_DIR"
 # "qwen": {"model_name": "Qwen/Qwen3-Embedding-0.6B"}
 
 MODEL_KEY="${MODEL_KEY:-bert}"
-# Empty DATA_PATH loads Quora pair/train from Hugging Face.
+# Empty DATA_PATH uses project data/quora-duplicates-pair.csv from download.sh.
 DATA_PATH="${DATA_PATH:-}"
 DATA_ARGS=(--max_train_samples "${MAX_TRAIN_SAMPLES:-150000}")
 

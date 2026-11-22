@@ -9,7 +9,8 @@ MODEL_NAME="google-bert/bert-base-uncased"
 CUDA_DEVICE=1
 OUTPUT_DIR="checkpoints/$METHOD/${MODEL_NAME##*/}"
 
-# Training uses Quora pair/train; evaluation uses the 21 tasks in common/mteb_tasks.py.
+# Run bash download.sh first. Training reads data/quora-duplicates-pair.csv.
+# Evaluation uses the 21 tasks in common/mteb_tasks.py and downloads their data automatically.
 declare -A TRAIN_DIRS=(
     [mrl]=MRL [mipic]=MIPIC [flag_mrl]=FlagMRL [ese]=ESE
 )

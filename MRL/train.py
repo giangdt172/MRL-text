@@ -109,8 +109,7 @@ def train(args):
                 model_name, "mrl", args.data_path or DATASET_NAME, output_dir)
     loader, tokenizer = build_train_loader(
         args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
-        seed=args.seed, max_train_samples=args.max_train_samples,
-        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+        seed=args.seed, max_train_samples=args.max_train_samples)
     logger.info("Training pairs: %s", loader.dataset.metadata)
     encoder = AutoModel.from_pretrained(model_name).to(device)
     if args.gradient_checkpointing:

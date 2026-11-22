@@ -21,31 +21,27 @@ DATASET_NAME = "sentence-transformers/quora-duplicates"
 DATASET_CONFIG = "pair"
 DATASET_SPLIT = "train"
 MAX_TRAIN_SAMPLES = 150_000
+DEFAULT_TRAIN_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "quora-duplicates-pair.csv"
 
 
 def add_training_data_args(parser):
-    parser.add_argument("--data_path", default=None,
-                        help="Optional local positive-pair CSV with anchor,positive columns; "
-                             "default loads sentence-transformers/quora-duplicates (pair/train)")
+    parser.add_argument("--data_path", default=str(DEFAULT_TRAIN_DATA_PATH),
+                        help="Positive-pair CSV with anchor,positive columns; "
+                             "default: project data/quora-duplicates-pair.csv from bash download.sh")
     parser.add_argument("--max_train_samples", type=int, default=MAX_TRAIN_SAMPLES,
                         help="Cap on training pairs; use all available rows when fewer (no oversampling)")
-    parser.add_argument("--data_cache_dir", default=None, help="Hugging Face dataset cache directory")
-    parser.add_argument("--dataset_revision", default=None, help="Optional Hub dataset commit/tag")
 
 
 def validate_training_data_args(args):
     if args.max_train_samples < 2:
         raise ValueError("max_train_samples must be at least two for in-batch negatives.")
-    if args.data_path:
-        path = Path(args.data_path).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Training pair CSV not found: {path}")
-        if not {"anchor", "positive"}.issubset(pd.read_csv(path, nrows=0).columns):
-            raise ValueError("Training CSV must contain 'anchor' and 'positive' columns; "
-                             "single-text and labeled pair-class CSVs are not positive-pair data.")
-        args.data_path = str(path)
-    else:
-        args.data_path = None
+    path = Path(args.data_path or DEFAULT_TRAIN_DATA_PATH).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Training pair CSV not found: {path}. Run bash download.sh first.")
+    if not {"anchor", "positive"}.issubset(pd.read_csv(path, nrows=0).columns):
+        raise ValueError("Training CSV must contain 'anchor' and 'positive' columns; "
+                         "single-text and labeled pair-class CSVs are not positive-pair data.")
+    args.data_path = str(path)
 
 
 class PositivePairDataset(Dataset):
@@ -99,31 +95,20 @@ def batch_inputs(batch, side, device):
             for name, value in batch[key].items()}
 
 
-def load_training_pairs(data_path=None, *, seed=42, max_train_samples=MAX_TRAIN_SAMPLES,
-                        data_cache_dir=None, dataset_revision=None):
-    if data_path:
-        frame = pd.read_csv(data_path, keep_default_na=False,
-                            dtype={"anchor": str, "positive": str})
-        metadata = {"source": "local_csv", "path": str(Path(data_path).expanduser().resolve())}
-    else:
-        # Optional at import time, so local CSV training and evaluation also work offline.
-        from datasets import load_dataset
-
-        raw = load_dataset(DATASET_NAME, DATASET_CONFIG, split=DATASET_SPLIT,
-                           cache_dir=data_cache_dir, revision=dataset_revision)
-        frame = raw.to_pandas()
-        metadata = {"source": DATASET_NAME, "config": DATASET_CONFIG, "split": DATASET_SPLIT,
-                    "revision": dataset_revision, "hf_fingerprint": raw._fingerprint}
+def load_training_pairs(data_path=None, *, seed=42, max_train_samples=MAX_TRAIN_SAMPLES):
+    path = Path(data_path or DEFAULT_TRAIN_DATA_PATH).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Training pair CSV not found: {path}. Run bash download.sh first.")
+    frame = pd.read_csv(path, keep_default_na=False, dtype={"anchor": str, "positive": str})
+    metadata = {"source": "local_csv", "path": str(path)}
     return PositivePairDataset(frame, max_train_samples=max_train_samples, seed=seed, metadata=metadata)
 
 
 def build_train_loader(data_path, model_name, max_length=256, batch_size=16, num_workers=2, *,
-                       seed=42, max_train_samples=MAX_TRAIN_SAMPLES, data_cache_dir=None,
-                       dataset_revision=None):
+                       seed=42, max_train_samples=MAX_TRAIN_SAMPLES):
     if batch_size < 2 or max_length < 1 or num_workers < 0:
         raise ValueError("batch_size must be at least two, max_length positive, num_workers nonnegative.")
-    dataset = load_training_pairs(data_path, seed=seed, max_train_samples=max_train_samples,
-                                  data_cache_dir=data_cache_dir, dataset_revision=dataset_revision)
+    dataset = load_training_pairs(data_path, seed=seed, max_train_samples=max_train_samples)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
@@ -147,8 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_csv", help="Optional destination for an anchor,positive CSV export")
     args = parser.parse_args()
     validate_training_data_args(args)
-    pairs = load_training_pairs(args.data_path, seed=args.seed, max_train_samples=args.max_train_samples,
-                                data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+    pairs = load_training_pairs(args.data_path, seed=args.seed, max_train_samples=args.max_train_samples)
     if args.output_csv:
         destination = Path(args.output_csv).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
