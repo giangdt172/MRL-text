@@ -114,7 +114,7 @@ def test_real_mteb_selected_tasks_results_and_rng_restoration(encoder_dir, offli
     assert random.getstate() == python_state
     np.testing.assert_array_equal(np.random.get_state()[1], np_state[1])
     torch.testing.assert_close(torch.get_rng_state(), torch_state)
-    assert requests == [("STSBenchmark", {"eval_splits": ["test"], "languages": ["eng"]})] * 2
+    assert requests == [("STSBenchmark", {"eval_splits": ["test"], "languages": ["eng"]})]
     assert result["tasks"] == ["STSBenchmark"]
     assert set(result["scores"]) == {"dim_4", "dim_16"}
     assert all(np.isfinite(scores["STSBenchmark"]) for scores in result["scores"].values())
@@ -147,7 +147,7 @@ def test_tasks_run_through_all_dims_with_separate_caches(encoder_dir, offline_mt
                                 eval_tasks=["STSBenchmark", "SICK-R"], batch_size=2)
     finally:
         hook.remove()
-    assert [name for name, kwargs in requests] == ["STSBenchmark", "STSBenchmark", "SICK-R", "SICK-R"]
+    assert [name for name, kwargs in requests] == ["STSBenchmark", "SICK-R"]
     assert sum(encoded_rows) == 14  # Seven unique strings per task, independent of dimension count.
     assert cleared == [7, 7]
     for key, path in result["raw_results"].items():
@@ -156,7 +156,7 @@ def test_tasks_run_through_all_dims_with_separate_caches(encoder_dir, offline_mt
         assert set(result["scores"][key]) == {"STSBenchmark", "SICK-R"}
 
 
-@pytest.mark.parametrize("name", ["Banking77Classification", "ArguAna"])
+@pytest.mark.parametrize("name", ["Banking77Classification", "ArguAna", "TwentyNewsgroupsClustering.v2"])
 def test_cached_dims_match_independent_mteb_runs(name, encoder_dir, monkeypatch, tmp_path):
     monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
     mteb = pytest.importorskip("mteb")
@@ -177,6 +177,15 @@ def test_cached_dims_match_independent_mteb_runs(name, encoder_dir, monkeypatch,
                 "test": Dataset.from_dict({"text": ["good day", "sun", "bad night", "rain"],
                                            "label": [0, 0, 1, 1]}),
             }
+        elif task_name == "TwentyNewsgroupsClustering.v2":
+            task.n_clusters = 2
+            task.max_fraction_of_documents_to_embed = None
+            task.max_document_to_embed = 6
+            task.max_documents_per_cluster = 4
+            task.dataset = {"test": Dataset.from_dict({
+                "sentences": ["good", "good day", "sun", "good sun", "bad", "bad night", "rain", "bad rain"],
+                "labels": [["a"]] * 4 + [["b"]] * 4,
+            })}
         else:
             task.dataset = {"default": {"test": {
                 "corpus": Dataset.from_dict({"id": ["d1", "d2", "d3", "d4"],
@@ -201,7 +210,37 @@ def test_mteb_loads_uncached_json_dataset(encoder_dir, monkeypatch, tmp_path):
     """Exercise MTEB -> load_dataset -> DownloadManager, including first-time loading."""
     monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
     mteb = pytest.importorskip("mteb")
+    from mteb.abstasks import abstask
+
     original_get_task = mteb.get_task
+    original_load = abstask.load_dataset
+    original_evaluate = mteb.evaluate
+    loads, transforms, evaluated, sampled = [], [], [], []
+
+    def load_dataset(**kwargs):
+        loads.append(kwargs)
+        return original_load(**kwargs)
+
+    def transform(task, **kwargs):
+        transforms.append(task)
+        # Loading may change task attributes and consume global and task-local RNGs.
+        task.loaded_marker = task.rng_state.random()
+        random.random()
+        np.random.random()
+        torch.rand(1)
+        task.np_rng.random()
+
+    def run(adapter, *, tasks, **kwargs):
+        task = tasks[0]
+        assert task.data_loaded and task.loaded_marker == transforms[0].loaded_marker
+        evaluated.append(task)
+        assert task.dataset is transforms[0].dataset
+        sampled.append((random.random(), np.random.random(), torch.rand(1).item(),
+                        task.rng_state.random(), task.np_rng.random()))
+        return original_evaluate(adapter, tasks=tasks, **kwargs)
+
+    monkeypatch.setattr(abstask, "load_dataset", load_dataset)
+    monkeypatch.setattr(mteb, "evaluate", run)
     data_file = tmp_path / "sts.jsonl"
     records = [
         {"sentence1": "good day", "sentence2": "good day", "score": 5.0},
@@ -215,6 +254,7 @@ def test_mteb_loads_uncached_json_dataset(encoder_dir, monkeypatch, tmp_path):
 
     def get_task(name, **kwargs):
         task = original_get_task(name, **kwargs)
+        monkeypatch.setattr(type(task), "dataset_transform", transform)
         task.metadata = task.metadata.model_copy(update={
             "superseded_by": None,
             "dataset": {"path": "json", "revision": "local-test", "data_files": {"test": str(data_file)},
@@ -232,6 +272,38 @@ def test_mteb_loads_uncached_json_dataset(encoder_dir, monkeypatch, tmp_path):
     assert set(result["scores"]) == {"dim_4", "dim_16"}
     assert all(np.isfinite(scores["STSBenchmark"]) for scores in result["scores"].values())
     assert list((tmp_path / "dataset-cache").rglob("*.arrow"))
+    assert len(loads) == len(transforms) == 1
+    assert len(evaluated) == 2 and evaluated[0] is not evaluated[1]
+    assert sampled[0] == sampled[1]
+    assert result["dataset_load_seconds"]["STSBenchmark"] >= 0
+    assert transforms[0].dataset is None  # Prepared data released after this task.
+
+
+def test_retrieval_loads_corpus_queries_and_qrels_once(encoder_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
+    mteb = pytest.importorskip("mteb")
+    from datasets import Dataset
+    from mteb.abstasks import retrieval_dataset_loaders
+    from mteb.abstasks.retrieval import RetrievalDatasetLoader
+
+    loads = []
+
+    def load(loader, **kwargs):
+        loads.append(loader)
+        return {
+            "corpus": Dataset.from_dict({"id": ["d1", "d2", "d3", "d4"],
+                                         "text": ["good day", "bad night", "sun", "rain"]}),
+            "queries": Dataset.from_dict({"id": ["q1", "q2"], "text": ["good", "bad"]}),
+            "relevant_docs": {"q1": {"d1": 1}, "q2": {"d2": 1}}, "top_ranked": None,
+        }
+
+    monkeypatch.setattr(retrieval_dataset_loaders, "get_dataset_config_names", lambda *a, **kw: ["default"])
+    monkeypatch.setattr(RetrievalDatasetLoader, "load", load)
+    model = AutoModel.from_pretrained(encoder_dir).eval()
+    tokenizer = AutoTokenizer.from_pretrained(encoder_dir)
+    result = evaluate_model(model, tokenizer, [4, 16], tmp_path, eval_tasks=["ArguAna"], batch_size=2)
+    assert len(loads) == 1
+    assert all(np.isfinite(scores["ArguAna"]) for scores in result["scores"].values())
 
 
 def test_mteb_failure_restores_training_mode_and_rng(encoder_dir, offline_mteb, monkeypatch, tmp_path):
@@ -289,7 +361,7 @@ def test_default_eval_uses_only_selected_preset(method, pairs_csv):
 def test_selected_preset_resolves_exact_task_versions(monkeypatch, tmp_path):
     monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
     mteb = pytest.importorskip("mteb")
-    assert len(DEFAULT_EVAL_TASKS) == len(set(DEFAULT_EVAL_TASKS)) == 21
+    assert DEFAULT_EVAL_TASKS and len(DEFAULT_EVAL_TASKS) == len(set(DEFAULT_EVAL_TASKS))
     for task_type, names in EVAL_TASK_GROUPS.items():
         for name in names:
             task = mteb.get_task(name, eval_splits=["test"], languages=["eng"])

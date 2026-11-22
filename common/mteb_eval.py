@@ -1,9 +1,11 @@
 import argparse
+from copy import deepcopy
 from importlib.metadata import version
 import json
 import math
 from pathlib import Path
 import random
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -138,7 +140,8 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
                "model_name": getattr(model.config, "_name_or_path", ""), "output_dir": str(directory),
                "tasks": [], "eval_splits": splits,
                "eval_languages": languages, "matryoshka_dims": dims, "pooling": pooling,
-               "max_length": max_length, "seed": seed, "metrics": {}, "scores": {}, "raw_results": {}}
+               "max_length": max_length, "seed": seed, "metrics": {}, "scores": {}, "raw_results": {},
+               "dataset_load_seconds": {}}
     was_training = model.training
     python_state, numpy_state = random.getstate(), np.random.get_state()
     try:
@@ -152,27 +155,39 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
             for name in names:
                 adapter = MatryoshkaEncoder(model, tokenizer, dims[0], pooling=pooling,
                                             max_length=max_length, batch_size=batch_size)
+                prepared_task = task = None
                 try:
+                    random.seed(seed)
+                    np.random.seed(seed)
+                    torch.manual_seed(seed)
+                    prepared_task = mteb.get_task(name, eval_splits=splits, languages=languages)
+                    task_name = prepared_task.metadata.name
+                    # Preloaded datasets are retained by MTEB rather than unloaded after each run.
+                    start_load = perf_counter()
+                    prepared_task.load_data(num_proc=None)
+                    results["dataset_load_seconds"][task_name] = perf_counter() - start_load
+                    print(f"{task_name}: dataset ready in "
+                          f"{results['dataset_load_seconds'][task_name]:.2f}s; reusing across {len(dims)} dims")
+                    results["tasks"].append(task_name)
+                    results["metrics"][task_name] = prepared_task.metadata.main_score
+                    # Transforms can consume RNG state. Every dim starts from the same post-load state.
+                    loaded_python_state, loaded_numpy_state = random.getstate(), np.random.get_state()
                     for dim in dims:
-                        # Fresh task-local RNGs keep classification sampling identical across dims.
-                        random.seed(seed)
-                        np.random.seed(seed)
-                        torch.manual_seed(seed)
-                        task = mteb.get_task(name, eval_splits=splits, languages=languages)
-                        task_name = task.metadata.name
-                        if task_name not in results["tasks"]:
-                            results["tasks"].append(task_name)
-                        results["metrics"][task_name] = task.metadata.main_score
+                        random.setstate(loaded_python_state)
+                        np.random.set_state(loaded_numpy_state)
+                        # Copy task-local RNGs/configuration, but share the prepared dataset in RAM.
+                        task = deepcopy(prepared_task, {id(prepared_task.dataset): prepared_task.dataset})
                         adapter.set_dim(dim)
                         adapter.mteb_model_meta = ModelMeta.create_empty(overwrites={
                             "name": f"local/{directory.name}", "revision": f"epoch-{epoch}-dim-{dim}",
                             "embed_dim": dim, "max_tokens": max_length,
                             "modalities": ["text"], "similarity_fn_name": "cosine"})
-                        # Recompute scores for each dimension/epoch; only full embeddings are reused.
+                        # Recompute scores for each dimension/epoch; reuse data and full embeddings.
                         # None selects serial dataset loading; num_proc=0 is invalid for datasets.
-                        model_result = mteb.evaluate(adapter, tasks=[task], cache=None, overwrite_strategy="always",
-                                                     co2_tracker=False, raise_error=True, num_proc=None,
-                                                     encode_kwargs={"batch_size": batch_size})
+                        with torch.random.fork_rng(devices=devices):
+                            model_result = mteb.evaluate(adapter, tasks=[task], cache=None, overwrite_strategy="always",
+                                                         co2_tracker=False, raise_error=True, num_proc=None,
+                                                         encode_kwargs={"batch_size": batch_size})
                         key = f"dim_{dim}"
                         results["scores"].setdefault(key, {}).update({
                             result.task_name: result.get_score() for result in model_result.task_results})
@@ -187,6 +202,10 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
                         results["raw_results"][key] = str(raw_path.relative_to(directory))
                 finally:
                     adapter.clear_cache()
+                    if task is not None:
+                        task.unload_data()
+                    if prepared_task is not None:
+                        prepared_task.unload_data()
 
     finally:
         model.train(was_training)

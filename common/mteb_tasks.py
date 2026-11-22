@@ -10,25 +10,21 @@ EVAL_TASK_GROUPS = {
         "STS15",
     ),
     "Retrieval": (
-        "FiQA2018",  # Finance QA
-        "SCIDOCS",
+        "SciFact",
         "ArguAna",
-        "CQADupstackGamingRetrieval",
-        "CQADupstackUnixRetrieval",
-    ),
+        "NFCorpus",    ),
     "Classification": (
         "Banking77Classification",
-        "TweetSentimentExtractionClassification",
         "ToxicConversationsClassification",
         "ImdbClassification",
         "MassiveIntentClassification",
     ),
     "Clustering": (
         "ArXivHierarchicalClusteringS2S",
-        "MedrxivClusteringS2S.v2",
-        "TwentyNewsgroupsClustering.v2",
-        "BiorxivClusteringP2P.v2",
-        "MedrxivClusteringP2P.v2",
+        "MedrxivClusteringS2S",
+        "TwentyNewsgroupsClustering",
+        "BiorxivClusteringP2P",
+        "MedrxivClusteringP2P",
     ),
 }
 

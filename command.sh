@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-METHODS=(mrl mipic flag_mrl ese)  # Run sequentially in this order.
+METHODS=(flag_mrl ese mipic)  # Run sequentially in this order.
 # Models: bert=google-bert/bert-base-uncased; tinybert=huawei-noah/TinyBERT_General_6L_768D
 #         bgem3=BAAI/bge-m3; qwen=Qwen/Qwen3-Embedding-0.6B.
 MODEL_NAME="google-bert/bert-base-uncased"
@@ -35,6 +35,6 @@ for METHOD in "${METHODS[@]}"; do
         --max_train_samples 150000 --max_length 256 --seed 42 \
         --weight_decay 0.01 --temperature 0.07 \
         --num_workers 2 --log_every 10 \
-        --run_eval 1 --eval_batch_size 64 --eval_max_length 256 \
+        --run_eval 1 --eval_batch_size 256 --eval_max_length 256 \
         "${EXTRA_ARGS[@]}"
 done
