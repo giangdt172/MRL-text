@@ -1,9 +1,3 @@
-"""Selected MTEB text tasks evaluated independently at each Matryoshka prefix.
-
-Uses MTEB 2's DataLoader encoder protocol. Pooling matches training; FlagTextModel
-applies its learned basis before pooling/truncation. Normalize after truncation.
-"""
-
 import argparse
 from importlib.metadata import version
 import json
@@ -51,10 +45,18 @@ class MatryoshkaEncoder:
     def __init__(self, model, tokenizer, dim, *, pooling="cls", max_length=256, batch_size=64):
         self.model, self.tokenizer, self.dim = model, tokenizer, dim
         self.pooling, self.max_length, self.batch_size = pooling, max_length, batch_size
+        self._embedding_cache = {}
         evaluation_dims(model.config.hidden_size, [dim])
         if pooling not in {"cls", "mean"}:
             raise ValueError("pooling must be cls or mean.")
         self.mteb_model_meta = None  # Assigned by evaluate_model; keeps the adapter importable without MTEB.
+
+    def set_dim(self, dim):
+        evaluation_dims(self.model.config.hidden_size, [dim])
+        self.dim = dim
+
+    def clear_cache(self):
+        self._embedding_cache.clear()
 
     @torch.inference_mode()
     def encode(self, inputs, *, task_metadata=None, hf_split=None, hf_subset=None, prompt_type=None, **kwargs):
@@ -62,9 +64,13 @@ class MatryoshkaEncoder:
         device = next(self.model.parameters()).device
         # Keep the unprompted training protocol for both queries and passages.
         for batch in inputs:
-            texts = batch["text"]
-            for start in range(0, len(texts), self.batch_size):
-                features = self.tokenizer(list(texts[start:start + self.batch_size]), padding=True,
+            texts = list(batch["text"])
+            if not texts:
+                continue
+            missing = list(dict.fromkeys(text for text in texts if text not in self._embedding_cache))
+            for start in range(0, len(missing), self.batch_size):
+                unseen = missing[start:start + self.batch_size]
+                features = self.tokenizer(unseen, padding=True,
                                           truncation=True, max_length=self.max_length, return_tensors="pt")
                 features = {key: value.to(device) for key, value in features.items()}
                 hidden = self.model(**features, return_dict=True).last_hidden_state.float()
@@ -73,7 +79,12 @@ class MatryoshkaEncoder:
                 else:
                     mask = features["attention_mask"].unsqueeze(-1).float()
                     embeddings = (hidden * mask).sum(1) / mask.sum(1).clamp_min(1)
-                chunks.append(F.normalize(embeddings[:, :self.dim], dim=-1).cpu().numpy())
+                # Cache unnormalized full coordinates; every dimension uses its own prefix norm.
+                for text, embedding in zip(unseen, embeddings.cpu().numpy()):
+                    self._embedding_cache[text] = embedding.copy()
+            # Restore duplicates and the exact input order expected by the task evaluator.
+            prefix = np.stack([self._embedding_cache[text][:self.dim] for text in texts])
+            chunks.append(F.normalize(torch.from_numpy(prefix), dim=-1).numpy())
         return np.concatenate(chunks) if chunks else np.empty((0, self.dim), dtype=np.float32)
 
     @staticmethod
@@ -137,31 +148,46 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
             import mteb
             from mteb.models.model_meta import ModelMeta
 
-            for dim in dims:
-                # Each level starts with the same evaluation seed, independent of task side effects.
-                random.seed(seed)
-                np.random.seed(seed)
-                torch.manual_seed(seed)
-                # Fresh task instances also reset MTEB's task-local sampling RNGs.
-                tasks = [mteb.get_task(name, eval_splits=splits, languages=languages) for name in names]
-                results["tasks"] = [task.metadata.name for task in tasks]
-                results["metrics"] = {task.metadata.name: task.metadata.main_score for task in tasks}
-                adapter = MatryoshkaEncoder(model, tokenizer, dim, pooling=pooling,
+            raw_by_dim = {}
+            for name in names:
+                adapter = MatryoshkaEncoder(model, tokenizer, dims[0], pooling=pooling,
                                             max_length=max_length, batch_size=batch_size)
-                adapter.mteb_model_meta = ModelMeta.create_empty(overwrites={
-                    "name": f"local/{directory.name}", "revision": f"epoch-{epoch}-dim-{dim}",
-                    "embed_dim": dim, "max_tokens": max_length,
-                    "modalities": ["text"], "similarity_fn_name": "cosine"})
-                # Never reuse scores from a different epoch, checkpoint, or dimension.
-                # MTEB forwards num_proc to datasets.load_dataset; 0 causes division by zero there.
-                model_result = mteb.evaluate(adapter, tasks=tasks, cache=None, overwrite_strategy="always",
-                                             co2_tracker=False, raise_error=True, num_proc=None,
-                                             encode_kwargs={"batch_size": batch_size})
-                key = f"dim_{dim}"
-                results["scores"][key] = {task.task_name: task.get_score() for task in model_result.task_results}
-                raw_path = raw_dir / key / "results.json"
-                write_json(raw_path, model_result.model_dump(mode="json"))
-                results["raw_results"][key] = str(raw_path.relative_to(directory))
+                try:
+                    for dim in dims:
+                        # Fresh task-local RNGs keep classification sampling identical across dims.
+                        random.seed(seed)
+                        np.random.seed(seed)
+                        torch.manual_seed(seed)
+                        task = mteb.get_task(name, eval_splits=splits, languages=languages)
+                        task_name = task.metadata.name
+                        if task_name not in results["tasks"]:
+                            results["tasks"].append(task_name)
+                        results["metrics"][task_name] = task.metadata.main_score
+                        adapter.set_dim(dim)
+                        adapter.mteb_model_meta = ModelMeta.create_empty(overwrites={
+                            "name": f"local/{directory.name}", "revision": f"epoch-{epoch}-dim-{dim}",
+                            "embed_dim": dim, "max_tokens": max_length,
+                            "modalities": ["text"], "similarity_fn_name": "cosine"})
+                        # Recompute scores for each dimension/epoch; only full embeddings are reused.
+                        # None selects serial dataset loading; num_proc=0 is invalid for datasets.
+                        model_result = mteb.evaluate(adapter, tasks=[task], cache=None, overwrite_strategy="always",
+                                                     co2_tracker=False, raise_error=True, num_proc=None,
+                                                     encode_kwargs={"batch_size": batch_size})
+                        key = f"dim_{dim}"
+                        results["scores"].setdefault(key, {}).update({
+                            result.task_name: result.get_score() for result in model_result.task_results})
+                        raw = model_result.model_dump(mode="json")
+                        if key not in raw_by_dim:
+                            raw_by_dim[key] = raw
+                        else:
+                            raw_by_dim[key]["task_results"].extend(raw["task_results"])
+                        raw_path = raw_dir / key / "results.json"
+                        # Save each finished task so a later failure does not discard its raw scores.
+                        write_json(raw_path, raw_by_dim[key])
+                        results["raw_results"][key] = str(raw_path.relative_to(directory))
+                finally:
+                    adapter.clear_cache()
+
     finally:
         model.train(was_training)
         random.setstate(python_state)

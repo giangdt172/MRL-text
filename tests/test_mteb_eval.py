@@ -46,6 +46,35 @@ def test_adapter_pool_project_truncate_normalize(encoder_dir, pooling, flag):
     torch.testing.assert_close(adapter.similarity_pairwise(actual, actual), torch.ones(3))
 
 
+def test_adapter_reuses_full_embeddings_and_restores_duplicate_rows(encoder_dir):
+    model = AutoModel.from_pretrained(encoder_dir).eval()
+    tokenizer = AutoTokenizer.from_pretrained(encoder_dir)
+    texts = ["good", "bad night", "good", "day sun"]
+    with torch.no_grad():
+        features = tokenizer(texts, padding=True, return_tensors="pt")
+        full = model(**features).last_hidden_state[:, 0].float()
+    encoded_rows = []
+    hook = model.register_forward_pre_hook(
+        lambda module, args, kwargs: encoded_rows.append(kwargs["input_ids"].size(0)), with_kwargs=True)
+    try:
+        adapter = MatryoshkaEncoder(model, tokenizer, 4, batch_size=2)
+        small = adapter.encode([{"text": texts}])
+        assert sum(encoded_rows) == 3  # Three unique strings, not four rows.
+        adapter.set_dim(16)
+        # Changed batch boundaries must still reuse the same full embeddings.
+        large = adapter.encode([{"text": texts[:1]}, {"text": texts[1:]}])
+        assert sum(encoded_rows) == 3
+        np.testing.assert_allclose(small, F.normalize(full[:, :4], dim=-1).numpy(), atol=1e-6)
+        np.testing.assert_allclose(large, F.normalize(full, dim=-1).numpy(), atol=1e-6)
+        np.testing.assert_array_equal(large[0], large[2])
+        adapter.clear_cache()
+        assert not adapter._embedding_cache
+        adapter.encode([{"text": texts}])
+        assert sum(encoded_rows) == 6
+    finally:
+        hook.remove()
+
+
 @pytest.fixture
 def offline_mteb(monkeypatch, tmp_path):
     monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
@@ -97,6 +126,75 @@ def test_real_mteb_selected_tasks_results_and_rng_restoration(encoder_dir, offli
     assert (tmp_path / "results.csv").is_file()
     assert (tmp_path / "results_long.csv").is_file()
     assert "| 1 | cosine_spearman |" in (tmp_path / "summary_all_epochs.txt").read_text()
+
+
+def test_tasks_run_through_all_dims_with_separate_caches(encoder_dir, offline_mteb, monkeypatch, tmp_path):
+    _, requests = offline_mteb
+    model = AutoModel.from_pretrained(encoder_dir).eval()
+    tokenizer = AutoTokenizer.from_pretrained(encoder_dir)
+    encoded_rows, cleared = [], []
+    original_clear = MatryoshkaEncoder.clear_cache
+
+    def clear(adapter):
+        cleared.append(len(adapter._embedding_cache))
+        original_clear(adapter)
+
+    monkeypatch.setattr(MatryoshkaEncoder, "clear_cache", clear)
+    hook = model.register_forward_pre_hook(
+        lambda module, args, kwargs: encoded_rows.append(kwargs["input_ids"].size(0)), with_kwargs=True)
+    try:
+        result = evaluate_model(model, tokenizer, [4, 16], tmp_path,
+                                eval_tasks=["STSBenchmark", "SICK-R"], batch_size=2)
+    finally:
+        hook.remove()
+    assert [name for name, kwargs in requests] == ["STSBenchmark", "STSBenchmark", "SICK-R", "SICK-R"]
+    assert sum(encoded_rows) == 14  # Seven unique strings per task, independent of dimension count.
+    assert cleared == [7, 7]
+    for key, path in result["raw_results"].items():
+        raw = json.loads((tmp_path / path).read_text())
+        assert [task["task_name"] for task in raw["task_results"]] == ["STSBenchmark", "SICK-R"]
+        assert set(result["scores"][key]) == {"STSBenchmark", "SICK-R"}
+
+
+@pytest.mark.parametrize("name", ["Banking77Classification", "ArguAna"])
+def test_cached_dims_match_independent_mteb_runs(name, encoder_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
+    mteb = pytest.importorskip("mteb")
+    from datasets import Dataset
+
+    original_get_task = mteb.get_task
+
+    def get_task(task_name, **kwargs):
+        task = original_get_task(task_name, **kwargs)
+        task.metadata = task.metadata.model_copy(update={"superseded_by": None})
+        if task_name == "Banking77Classification":
+            task.n_experiments = 2
+            task.samples_per_label = 2
+            task.dataset = {
+                "train": Dataset.from_dict({"text": ["good", "good day", "sun", "good sun",
+                                                       "bad", "bad night", "rain", "bad rain"],
+                                            "label": [0] * 4 + [1] * 4}),
+                "test": Dataset.from_dict({"text": ["good day", "sun", "bad night", "rain"],
+                                           "label": [0, 0, 1, 1]}),
+            }
+        else:
+            task.dataset = {"default": {"test": {
+                "corpus": Dataset.from_dict({"id": ["d1", "d2", "d3", "d4"],
+                                             "text": ["good day", "bad night", "sun", "rain"]}),
+                "queries": Dataset.from_dict({"id": ["q1", "q2"], "text": ["good", "bad"]}),
+                "relevant_docs": {"q1": {"d1": 1}, "q2": {"d2": 1}}, "top_ranked": None,
+            }}}
+        task.data_loaded = True
+        return task
+
+    monkeypatch.setattr(mteb, "get_task", get_task)
+    model = AutoModel.from_pretrained(encoder_dir).eval()
+    tokenizer = AutoTokenizer.from_pretrained(encoder_dir)
+    cached = evaluate_model(model, tokenizer, [4, 16], tmp_path / "cached", eval_tasks=[name], batch_size=2)
+    for dim in (4, 16):
+        independent = evaluate_model(model, tokenizer, [dim], tmp_path / f"single-{dim}",
+                                     eval_tasks=[name], batch_size=2)
+        assert cached["scores"][f"dim_{dim}"] == independent["scores"][f"dim_{dim}"]
 
 
 def test_mteb_loads_uncached_json_dataset(encoder_dir, monkeypatch, tmp_path):
