@@ -32,6 +32,23 @@ def json_safe(value):
     return value
 
 
+def format_summary(results):
+    """One two-column table per test; STS reports correlation, not accuracy."""
+    tables = []
+    for task_type in ("classification", "pair", "sts"):
+        metric_name = "Spearman" if task_type == "sts" else "Accuracy"
+        for test_name, levels in results.get(task_type, {}).items():
+            lines = [f"{test_name} ({task_type})", "",
+                     f"| Dims | {metric_name} |", "| ---: | ---: |"]
+            for key in sorted(levels, key=lambda key: int(key.removeprefix("dim_"))):
+                dim = int(key.removeprefix("dim_"))
+                value = levels[key] if task_type == "sts" else levels[key]["accuracy"]
+                score = "N/A" if value is None or not math.isfinite(value) else f"{value:.4f}"
+                lines.append(f"| {dim} | {score} |")
+            tables.append("\n".join(lines))
+    return "\n\n".join(tables) + "\n"
+
+
 def evaluate(checkpoint_dir, matryoshka_dims=None, device=None):
     model = FlagTextModel.from_pretrained(checkpoint_dir)
     dims = model.projector.dims if matryoshka_dims is None else matryoshka_dims
@@ -54,7 +71,12 @@ def evaluate(checkpoint_dir, matryoshka_dims=None, device=None):
     temporary_path.write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
                               encoding="utf-8")
     temporary_path.replace(result_path)
+    summary = format_summary(results)
+    summary_path = Path(checkpoint_dir) / "summary.txt"
+    summary_path.write_text(summary, encoding="utf-8")
     print(f"Results saved to: {result_path.resolve()}")
+    print(f"Summary saved to: {summary_path.resolve()}")
+    print(f"\nEvaluation summary\n\n{summary}")
     return results
 
 

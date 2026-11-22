@@ -1,27 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOSS_TYPE="${LOSS_TYPE:-flag_mrl}"
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --loss_type)
-            if [[ $# -lt 2 ]]; then
-                echo "--loss_type requires flag_mrl or flag_mrl_trace_ratio." >&2
-                exit 2
-            fi
-            LOSS_TYPE="$2"
-            shift 2
-            ;;
-        *)
-            echo "Usage: $0 [--loss_type flag_mrl|flag_mrl_trace_ratio]. Configure other options with environment variables (MODEL_KEY, DATA_PATH, OUTPUT_DIR, ...)." >&2
-            exit 2
-            ;;
-    esac
-done
-case "$LOSS_TYPE" in
-    flag_mrl|flag_mrl_trace_ratio) ;;
-    *) echo "Unknown loss_type: $LOSS_TYPE; choose flag_mrl or flag_mrl_trace_ratio." >&2; exit 2 ;;
-esac
+# Example: FLAG_OBJECTIVE=trace_ratio bash FlagMRL/run_all.sh
+# Available objectives are registered in FlagMRL/objectives.py.
+FLAG_OBJECTIVE="${FLAG_OBJECTIVE:-trace_ratio}"
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
@@ -33,7 +15,7 @@ cd "$PROJECT_DIR"
 
 MODEL_KEY="${MODEL_KEY:-bert}"
 DATA_PATH="${DATA_PATH:-./final-data/final_data.csv}"
-OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/checkpoints/FlagMRL/$MODEL_KEY}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/checkpoints/FlagMRL/$FLAG_OBJECTIVE/$MODEL_KEY}"
 DEVICE="${DEVICE:-cuda}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_EVAL="${RUN_EVAL:-1}"
@@ -47,7 +29,7 @@ fi
 
 "$PYTHON_BIN" -u FlagMRL/train.py \
     "${MODEL_ARGS[@]}" \
-    --loss_type "$LOSS_TYPE" \
+    --flag_objective "$FLAG_OBJECTIVE" \
     --data_path "$DATA_PATH" \
     --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" --precision "${PRECISION:-auto}" \

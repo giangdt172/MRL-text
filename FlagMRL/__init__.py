@@ -1,8 +1,6 @@
 """FlagMRL for text embeddings; no dependency on the VLM project."""
 
 from .loss import FlagMRLLoss, FlagProjector
-from .flag_mrl_trace_ratio import FlagMRLTraceRatioLoss
+from .objectives import FLAG_OBJECTIVES
 
-LOSS_TYPES = {"flag_mrl": FlagMRLLoss, "flag_mrl_trace_ratio": FlagMRLTraceRatioLoss}
-
-__all__ = ["FlagMRLLoss", "FlagMRLTraceRatioLoss", "FlagProjector", "LOSS_TYPES"]
+__all__ = ["FlagMRLLoss", "FlagProjector", "FLAG_OBJECTIVES"]

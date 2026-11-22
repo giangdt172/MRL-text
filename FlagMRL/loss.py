@@ -5,9 +5,9 @@ from torch import nn
 from torch.nn import functional as F
 
 from .encoder_loss import encoder_losses
-from .flag_math import flag_loss_and_grad, orthogonality_error, stiefel_step
+from .flag_math import orthogonality_error, stiefel_step
+from .objectives import get_flag_objective
 from .pairs import build_pair_weights
-from .trace_ratio import trace_ratio_loss_and_grad
 
 
 def resolve_dims(full_dim, dims=None):
@@ -27,7 +27,7 @@ class FlagProjector(nn.Module):
     """FP32 orthonormal basis, updated explicitly rather than by AdamW.
 
     a_j = number of supervised prefixes containing coordinate j / number of levels.
-    Flag objectives use x @ U @ diag(sqrt(a)); encoder loss uses x @ U.
+    Each objective interprets these prefix weights; encoder loss uses x @ U.
     """
 
     def __init__(self, full_dim, dims=None, init="identity", lr=0.1, eps=1e-4,
@@ -38,8 +38,8 @@ class FlagProjector(nn.Module):
                                       ("lambda_neg", lambda_neg, False)):
             if not math.isfinite(value) or value < 0 or (positive and value == 0):
                 raise ValueError(f"{name} must be finite and {'positive' if positive else 'nonnegative'}.")
-        if init not in {"identity", "random", "spherical"}:
-            raise ValueError("init must be identity, random, or spherical.")
+        if init not in {"identity", "random", "warmup"}:
+            raise ValueError("init must be identity, random, or warmup.")
         if retraction not in {"svd", "newton_schulz"}:
             raise ValueError("retraction must be svd or newton_schulz.")
         self.lr, self.eps = lr, eps
@@ -73,24 +73,18 @@ class FlagProjector(nn.Module):
 
     @torch.no_grad()
     def step(self, q, p, target, pos_ids=None, far_mode="uniform", far_tau=0.1,
-             *, objective="spherical"):
-        if objective not in {"spherical", "trace_ratio"}:
-            raise ValueError(f"Unknown flag objective: {objective}")
+             *, objective="trace_ratio"):
+        objective_fn = get_flag_objective(objective)
         with torch.autocast(device_type=q.device.type, enabled=False):
             q, p = F.normalize(q.detach().float(), dim=-1), F.normalize(p.detach().float(), dim=-1)
             near, far, valid = build_pair_weights(q, p, target, pos_ids, far_mode, far_tau)
             if not valid:
                 return {"flag_skipped": 1.0}
-            if objective == "trace_ratio":
-                loss, positive, negative, gradient = trace_ratio_loss_and_grad(
-                    self.U, self.a_col, (q, p, near), (q, p, far), self.eps)
-                metrics = {"flag_pos_scatter": positive, "flag_neg_scatter": negative,
-                           "flag_trace_ratio": -loss}
-            else:
-                loss, positive, negative, gradient = flag_loss_and_grad(
-                    self.U, self.a_col, (q, p, near), (q, p, far), self.eps, self.lambda_neg)
-                metrics = {"flag_gap": positive - negative,
-                           "flag_pos_cosine": positive, "flag_neg_cosine": negative}
+            loss, gradient, metrics = objective_fn(
+                self.U, self.a_col, (q, p, near), (q, p, far),
+                eps=self.eps, lambda_neg=self.lambda_neg)
+            if not torch.isfinite(loss) or not torch.isfinite(gradient).all():
+                raise FloatingPointError(f"Non-finite {objective} flag loss or gradient.")
             basis, norm = stiefel_step(self.U, gradient, self.lr, self.retraction)
             self.U.copy_(basis)
             return {"flag_loss": loss, **metrics,
@@ -99,11 +93,12 @@ class FlagProjector(nn.Module):
 
 
 class FlagMRLLoss(nn.Module):
-    flag_objective = "spherical"
-
     def __init__(self, projector, temperature=0.07, update_every=1,
-                 lambda_cross=0.0, far_mode="uniform", far_tau=0.1):
+                 lambda_cross=0.0, far_mode="uniform", far_tau=0.1,
+                 *, flag_objective="trace_ratio"):
         super().__init__()
+        get_flag_objective(flag_objective)
+        self.flag_objective = flag_objective
         if not math.isfinite(temperature) or temperature <= 0:
             raise ValueError("temperature must be positive and finite.")
         if isinstance(update_every, bool) or not isinstance(update_every, int) or update_every < 1:

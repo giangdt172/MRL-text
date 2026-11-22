@@ -150,7 +150,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims):
             accuracy = accuracy_score(y_test, y_pred)
             f1 = f1_score(y_test, y_pred, average="macro")
             dataset_results[f"dim_{dim}"] = {"accuracy": accuracy, "f1": f1}
-            print(f"  Dim {dim}: Accuracy = {accuracy:.4f}, F1 = {f1:.4f}")
+            print(f"  Dim {dim}: Accuracy = {accuracy:.4f}")
 
         task_results[Path(dev_path).stem] = dataset_results
     model.train()
@@ -210,7 +210,7 @@ def eval_pair(model, eval_loader, matryoshka_dims):
 
         metric = get_metric_pair_classification(preds, labels)
         results[f"dim_{dim}"] = metric
-        print(f"  Dim {dim}: {metric}")
+        print(f"  Dim {dim}: Accuracy = {metric['accuracy']:.4f}")
 
     return results
 

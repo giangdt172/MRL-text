@@ -6,7 +6,8 @@ set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$PWD"
 
-METHOD="flag_mrl_trace_ratio"  # mrl, mipic, flag_mrl, flag_mrl_trace_ratio
+METHOD="flag_mrl"  # mrl, mipic, flag_mrl
+FLAG_OBJECTIVE="trace_ratio"  # trace_ratio, spherical; registered in FlagMRL/objectives.py
 MODEL_NAME="google-bert/bert-base-uncased"
 CKPT_NAME="bert_run1"
 CUDA_DEVICE=0 
@@ -27,7 +28,7 @@ COMMON_ARGS=(
     --device "$DEVICE" --precision auto
     --epochs 5 --batch_size 32 --lr 2e-5
     --max_length 256 --seed 42
-    --weight_decay 0.01 --temperature 0.07
+    --weight_decay 0.01 --temperature 0.05
     --log_every 10
     # --matryoshka_dims 16 32 64 128 256 512
     # --gradient_checkpointing
@@ -52,6 +53,7 @@ MIPIC_ARGS=(
 )
 
 FLAG_ARGS=(
+    --flag_objective "$FLAG_OBJECTIVE"
     --max_grad_norm 1.0 --warmup_steps 0
     --flag_init identity --flag_init_batches 8
     --flag_lr 0.1 --flag_eps 1e-4
@@ -76,16 +78,12 @@ mipic() {
 }
 
 flag_mrl() {
-    "$PYTHON_BIN" -u FlagMRL/train.py "${COMMON_ARGS[@]}" "${FLAG_ARGS[@]}" --loss_type "$METHOD"
+    "$PYTHON_BIN" -u FlagMRL/train.py "${COMMON_ARGS[@]}" "${FLAG_ARGS[@]}"
     (
         cd "$FLAG_EVAL_WORK_DIR"
         "$PYTHON_BIN" -u "$PROJECT_DIR/FlagMRL/eval.py" \
             --checkpoint_dir "$OUTPUT_DIR" --device "$DEVICE"
     )
-}
-
-flag_mrl_trace_ratio() {
-    flag_mrl
 }
 
 "$METHOD"

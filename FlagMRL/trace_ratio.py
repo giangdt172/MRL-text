@@ -6,7 +6,7 @@ import torch
 
 
 @torch.no_grad()
-def trace_ratio_loss_and_grad(U, a_col, near, far, eps):
+def loss_and_grad(U, a_col, near, far, *, eps, lambda_neg=1.0):
     """Return -tr(P_U C_neg)/(tr(P_U C_pos)+eps) and its Euclidean gradient.
 
     Inputs follow the spherical objective's detached, normalized embeddings and
@@ -15,6 +15,7 @@ def trace_ratio_loss_and_grad(U, a_col, near, far, eps):
     C_neg = sum_{i != j} delta_ij delta_ij.T/(B*(B-1)).
     The existing a_col holds W's diagonal, including the full-dimensional level.
     Aggregate traces BEFORE division; do not normalize projected coordinates.
+    lambda_neg is unused: both scatters enter the ratio with coefficient one.
     """
     if not math.isfinite(eps) or eps <= 0:
         raise ValueError("The trace-ratio denominator regularizer eps must be positive and finite.")
@@ -51,4 +52,8 @@ def trace_ratio_loss_and_grad(U, a_col, near, far, eps):
         gradient = (-2 / denominator) * (neg_action - ratio * pos_action) * weights
         if not torch.isfinite(loss) or not torch.isfinite(gradient).all():
             raise FloatingPointError("Non-finite trace-ratio flag loss or gradient.")
-        return loss, positive, negative, gradient
+        return loss, gradient, {
+            "flag_pos_scatter": positive,
+            "flag_neg_scatter": negative,
+            "flag_trace_ratio": ratio,
+        }
