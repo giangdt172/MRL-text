@@ -10,21 +10,24 @@ EVAL_TASK_GROUPS = {
         "STS15",
     ),
     "Retrieval": (
-        "SciFact",
+        "QuoraRetrieval",
         "ArguAna",
-        "NFCorpus",    ),
+        "TRECCOVID",
+        "FEVER",
+    ),
     "Classification": (
         "Banking77Classification",
         "ToxicConversationsClassification",
-        "ImdbClassification",
+        "EmotionClassification",
         "MassiveIntentClassification",
     ),
     "Clustering": (
-        "ArXivHierarchicalClusteringS2S",
-        "MedrxivClusteringS2S",
+        "StackExchangeClustering",
+        "ArxivClusteringS2S",
         "TwentyNewsgroupsClustering",
-        "BiorxivClusteringP2P",
-        "MedrxivClusteringP2P",
+        "RedditClustering",
+        "MedrxivClusteringS2S",
+        "BiorxivClusteringS2S",
     ),
 }
 
