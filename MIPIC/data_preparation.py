@@ -258,7 +258,8 @@ def build_train_loader(
 
 
 # ─────────────────────────────────────────────
-# Evaluation task path lists (Kaggle paths)
+# Evaluation paths relative to the dataset root (--eval_work_dir).
+# Dataset folders live alongside MIPIC/, not inside it.
 # ─────────────────────────────────────────────
 EVAL_CLS_TASKS = [('./multitask-data/multi-data/banking_train.csv', 
                    './multitask-data/multi-data/banking77_validation.csv'),

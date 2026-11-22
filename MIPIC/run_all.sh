@@ -12,13 +12,13 @@ cd "$PROJECT_DIR"
 # Models: bert=google-bert/bert-base-uncased; tinybert=huawei-noah/TinyBERT_General_6L_768D
 #         bgem3=BAAI/bge-m3; qwen=Qwen/Qwen3-Embedding-0.6B.
 
-MODEL_KEY="${MODEL_KEY:-qwen}"
-DATA_PATH="${DATA_PATH:-./final-data/final_data.csv}"
+MODEL_KEY="${MODEL_KEY:-bert}"
+DATA_PATH="${DATA_PATH:-$PROJECT_DIR/final-data/final_data.csv}"
 OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/checkpoints/MIPIC/$MODEL_KEY}"
 DEVICE="${DEVICE:-cuda}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_EVAL="${RUN_EVAL:-1}"
-EVAL_WORK_DIR="${EVAL_WORK_DIR:-$PROJECT_DIR}"
+EVAL_WORK_DIR="${EVAL_WORK_DIR:-$PROJECT_DIR}"  # Contains multitask-data/ and sts-data/.
 case "$RUN_EVAL" in
     0|1) ;;
     *) echo "RUN_EVAL must be 0 or 1." >&2; exit 2 ;;
@@ -39,10 +39,10 @@ fi
     "${MODEL_ARGS[@]}" \
     --data_path "$DATA_PATH" --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" --precision "${PRECISION:-auto}" \
-    --epochs "${EPOCHS:-5}" --batch_size "${BATCH_SIZE:-32}" --lr "${LR:-2e-5}" \
+    --epochs "${EPOCHS:-8}" --batch_size "${BATCH_SIZE:-64}" --lr "${LR:-2e-5}" \
     --max_length "${MAX_LENGTH:-256}" --seed "${SEED:-42}" \
     --weight_decay "${WEIGHT_DECAY:-0.01}" --temperature "${TEMPERATURE:-0.07}" \
-    --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
+    --max_grad_norm "${MAX_GRAD_NORM:-1.0}" --warmup_steps 0 \
     --num_workers "${NUM_WORKERS:-2}" --log_every "${LOG_EVERY:-10}" \
     --run_eval "$RUN_EVAL" --eval_work_dir "$EVAL_WORK_DIR" \
     --eval_batch_size "${EVAL_BATCH_SIZE:-64}" \

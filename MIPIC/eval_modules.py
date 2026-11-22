@@ -101,7 +101,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims, pooli
         test_embeddings, _, y_test = extract_embeddings(model, loader(test_path), pooling=pooling)
         scores = {}
         for dim in matryoshka_dims:
-            classifier = LogisticRegression(random_state=42, n_jobs=1, max_iter=200)
+            classifier = LogisticRegression(random_state=42, n_jobs=1, max_iter=1000)
             classifier.fit(train_embeddings[:, :dim].numpy(), y_train)
             predictions = classifier.predict(test_embeddings[:, :dim].numpy())
             scores[f"dim_{dim}"] = {

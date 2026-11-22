@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$PWD"
 
-METHOD="flag_mrl"  # mrl, mipic, flag_mrl
+METHOD="mipic"  # mrl, mipic, flag_mrl
 FLAG_OBJECTIVE="trace_ratio"  # trace_ratio, spherical; registered in FlagMRL/objectives.py
 MODEL_NAME="google-bert/bert-base-uncased"
 CKPT_NAME="bert_run1"
@@ -19,7 +19,7 @@ DATA_PATH="$PROJECT_DIR/final-data/final_data.csv"
 OUTPUT_DIR="$PROJECT_DIR/checkpoints/$METHOD/$CKPT_NAME"
 
 MRL_EVAL_WORK_DIR="$PROJECT_DIR/MRL"
-MIPIC_EVAL_WORK_DIR="$PROJECT_DIR/MIPIC"
+MIPIC_EVAL_WORK_DIR="$PROJECT_DIR"  # Contains multitask-data/ and sts-data/.
 FLAG_EVAL_WORK_DIR="$PROJECT_DIR/FlagMRL"
 EVAL_BATCH_SIZE=64
 

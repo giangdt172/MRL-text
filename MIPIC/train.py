@@ -52,6 +52,7 @@ def validate_args(args):
         raise ValueError(f"Training CSV must contain a 'text' column: {data_path}")
     args.data_path = str(data_path)
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
+    args.eval_work_dir = str(Path(args.eval_work_dir).expanduser().resolve())
 
 
 def resolve_device_precision(device_name=None, precision="auto", no_amp=False):
@@ -190,6 +191,8 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
     logger.info("Model: %s | device: %s | precision: %s | output: %s", model_name, device, precision, output_dir)
+    logger.info("Training data: %s | eval data root: %s | eval every epoch: %s",
+                args.data_path, args.eval_work_dir, bool(args.run_eval))
     loader, tokenizer, _ = build_train_loader(
         args.data_path, model_name, "pair_cls", args.max_length, args.batch_size, args.num_workers)
     # AMP controls forward precision; optimizer parameters/gradients stay FP32.
@@ -296,10 +299,12 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
-    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--data_path",
+                        default=str(Path(__file__).resolve().parent.parent / "final-data" / "final_data.csv"),
+                        help="Training CSV with a text column")
     parser.add_argument("--output_dir", default="checkpoints/MIPIC")
     parser.add_argument("--epochs", type=int, default=8)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup_steps", type=int, default=0, help="Must be 0: notebook effective LR is constant")
@@ -322,7 +327,8 @@ def parse_args(argv=None):
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate every epoch")
-    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent.parent))
+    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent.parent),
+                        help="Dataset root containing multitask-data/ and sts-data/ (not MIPIC/)")
     parser.add_argument("--eval_batch_size", type=int, default=64)
     return parser.parse_args(argv)
 

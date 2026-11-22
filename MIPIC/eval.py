@@ -31,6 +31,7 @@ def json_safe(value):
 
 
 def evaluation_paths(eval_work_dir=None):
+    """Resolve task CSVs relative to the dataset root, independently of cwd."""
     base = Path(eval_work_dir).expanduser().resolve() if eval_work_dir else Path(__file__).resolve().parent.parent
     resolve = lambda path: str((base / path).resolve())
     return {
@@ -133,7 +134,8 @@ if __name__ == "__main__":
     parser.add_argument("--pooling", choices=["cls", "mean"], default=None)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--check_data", action="store_true", help="Check evaluation CSVs and exit")
-    parser.add_argument("--eval_work_dir", default=None)
+    parser.add_argument("--eval_work_dir", default=None,
+                        help="Dataset root containing multitask-data/ and sts-data/; defaults to the project root")
     args = parser.parse_args()
     if args.check_data:
         check_eval_data(args.eval_work_dir)

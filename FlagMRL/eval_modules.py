@@ -143,7 +143,7 @@ def eval_classification_task(model, tokenizer, path_list, matryoshka_dims, batch
             X_train, y_train = eval_cls(model, train_loader, dim=dim)
             X_test, y_test = eval_cls(model, eval_loader, dim=dim)
 
-            clf = LogisticRegression(random_state=42, n_jobs=1, max_iter=200, verbose=0)
+            clf = LogisticRegression(random_state=42, n_jobs=1, max_iter=1000, verbose=0)
             clf.fit(X_train, y_train)
             y_pred = clf.predict(X_test)
 
