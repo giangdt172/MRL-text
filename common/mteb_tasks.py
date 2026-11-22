@@ -13,7 +13,7 @@ EVAL_TASK_GROUPS = {
         "QuoraRetrieval",
         "ArguAna",
         "TRECCOVID",
-        "FEVER",
+        "AppsRetrieval",
     ),
     "Classification": (
         "Banking77Classification",
