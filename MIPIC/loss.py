@@ -11,6 +11,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from common.loss import info_nce
+
 
 def pool_hidden(hidden, mask=None, pooling="cls"):
     if pooling == "cls":
@@ -134,12 +136,7 @@ class PipelineInfoNCELoss(nn.Module):
         v_tgt = tgt_hidden[:, 0, :]
         u_proj = self.phi(u_src)
         v_tgt = v_tgt.detach()
-        u_proj = F.normalize(u_proj, dim=-1)
-        v_tgt = F.normalize(v_tgt, dim=-1)
-        logits = torch.matmul(u_proj, v_tgt.T) / temperature
-        labels = torch.arange(logits.size(0), device=logits.device)
-        loss = F.cross_entropy(logits, labels)
-        return loss
+        return info_nce(u_proj, v_tgt, temperature)[0]
 
 
 class TotalAlignmentLoss(nn.Module):
@@ -244,11 +241,7 @@ def _matry_infonce_fp32(a, b, temperature, nested_dims):
             continue
         q = a[:, :dim]
         k = b[:, :dim]
-        q = F.normalize(q, dim=-1)
-        k = F.normalize(k, dim=-1)
-        logits = torch.matmul(q, k.T) / temperature
-        labels = torch.arange(q.size(0), device=q.device)
-        loss = F.cross_entropy(logits, labels)
+        loss, logits = info_nce(q, k, temperature)
         total_loss += loss
         all_logits[f'dim_{dim}'] = logits
     return (total_loss, all_logits)

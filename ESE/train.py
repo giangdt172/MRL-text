@@ -1,9 +1,9 @@
-"""Train ESE with InfoNCE dropout views over a CSV 'text' column.
+"""Train ESE with InfoNCE over annotated Quora duplicate-question pairs.
 
 Uses ESE learn-to-express and PCA/MSE/KL learn-to-compress, with all Transformer
-blocks and no separate teacher. The task loss is one-way InfoNCE on two dropout
-views, using the repository's CSV/evaluation protocol rather than the paper's
-supervised AnglE/NLI recipe. Mean pooling preserves the supplied ESE notebooks;
+blocks and no separate teacher. The task loss is one-way InfoNCE on anchor/positive
+pairs, using the repository's evaluation protocol. Mean pooling preserves the
+supplied ESE notebooks;
 --pooling cls is also supported. The compression size is trained explicitly;
 --matryoshka_dims specifies evaluation sizes, not additional training losses.
 
@@ -24,19 +24,22 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-import pandas as pd
 import torch
 from tqdm import tqdm
+
+from common.mteb_eval import add_eval_args, validate_eval_args
 from transformers import AutoModel, get_scheduler
 
 from ESE.config import MODEL_CONFIGS
-from ESE.data_preparation import build_train_loader
+from common.data_preparation import (
+    DATASET_NAME, add_training_data_args, batch_inputs, build_train_loader, validate_training_data_args,
+)
 from ESE.loss import ese_loss, resolve_dims
 
 
 def validate_args(args):
-    if args.epochs < 1 or args.batch_size < 1 or args.max_length < 1:
-        raise ValueError("epochs, batch_size and max_length must be positive.")
+    if args.epochs < 1 or args.batch_size < 2 or args.max_length < 1:
+        raise ValueError("epochs/max_length must be positive; batch_size must be at least two.")
     if not math.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("lr must be positive and finite.")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -59,12 +62,8 @@ def validate_args(args):
         raise ValueError("warmup_ratio must be in [0, 1].")
     if args.ese_compression_size < 1:
         raise ValueError("ese_compression_size must be positive.")
-    data_path = Path(args.data_path).expanduser().resolve()
-    if not data_path.is_file():
-        raise FileNotFoundError(f"Training CSV not found: {data_path}. Set --data_path to your CSV.")
-    if "text" not in pd.read_csv(data_path, nrows=0).columns:
-        raise ValueError(f"Training CSV must contain a 'text' column: {data_path}")
-    args.data_path = str(data_path)
+    validate_training_data_args(args)
+    validate_eval_args(args)
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
 
 
@@ -108,9 +107,6 @@ def configure_logging(output_dir):
 
 def train(args):
     validate_args(args)
-    if args.run_eval:
-        from ESE.eval import check_eval_data
-        check_eval_data(args.eval_work_dir)
     device, precision = resolve_device_precision(args.device, args.precision, args.no_amp)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -125,9 +121,12 @@ def train(args):
         logger.info("Device: CPU | precision=%s", precision)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
     logger.info("Model: %s | loss_type: %s | data: %s | output: %s",
-                model_name, "ese", args.data_path, output_dir)
+                model_name, "ese", args.data_path or DATASET_NAME, output_dir)
     loader, tokenizer = build_train_loader(
-        args.data_path, model_name, args.max_length, args.batch_size, args.num_workers)
+        args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
+        seed=args.seed, max_train_samples=args.max_train_samples,
+        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+    logger.info("Training pairs: %s", loader.dataset.metadata)
     encoder = AutoModel.from_pretrained(model_name).to(device)
     if args.gradient_checkpointing:
         encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -137,10 +136,6 @@ def train(args):
     model.embedding_pooling = args.pooling
     if not 1 <= args.ese_compression_size <= model.config.hidden_size:
         raise ValueError("ese_compression_size must be in [1, hidden_size].")
-    dropout = [module.p for module in model.modules() if isinstance(module, torch.nn.Dropout)]
-    if not any(dropout):
-        logger.warning("Encoder has no active dropout. Identical text views have no dropout augmentation; "
-                       "this is especially relevant to pretrained Qwen embedding models.")
     dims = resolve_dims(encoder.config.hidden_size, args.matryoshka_dims)
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = len(loader)
@@ -159,7 +154,7 @@ def train(args):
     logger.info("Dims: %s | batch_size: %d | max_length: %d | gradient_checkpointing: %s",
                 dims, args.batch_size, args.max_length, args.gradient_checkpointing)
 
-    configuration = {**vars(args), "model_name": model_name, "matryoshka_dims": dims,
+    configuration = {**vars(args), "training_data": loader.dataset.metadata, "model_name": model_name, "matryoshka_dims": dims,
                      "loss_type": "ese", "task_loss": "one_way_infonce", "pooling": args.pooling,
                      "training_dims": [args.ese_compression_size, model.config.hidden_size],
                      "intermediate_layers": "all_transformer_blocks_excluding_embeddings",
@@ -176,14 +171,14 @@ def train(args):
             loss_sum, batches, skipped_steps = 0.0, 0, 0
             for batch in progress:
                 optimizer.zero_grad(set_to_none=True)
-                inputs = {key: value.to(device, non_blocking=device.type == "cuda")
-                          for key, value in batch.items()}
+                first_inputs = batch_inputs(batch, 1, device)
+                second_inputs = batch_inputs(batch, 2, device)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
-                    first = encoder(**inputs, output_hidden_states=True, return_dict=True)
-                    second = encoder(**inputs, output_hidden_states=True, return_dict=True)
+                    first = encoder(**first_inputs, output_hidden_states=True, return_dict=True)
+                    second = encoder(**second_inputs, output_hidden_states=True, return_dict=True)
                 loss, metrics = ese_loss(
                     first.hidden_states, second.hidden_states,
-                    inputs["attention_mask"], inputs["attention_mask"],
+                    first_inputs["attention_mask"], second_inputs["attention_mask"],
                     compression_size=args.ese_compression_size, temperature=args.temperature,
                     kl_temperature=args.ese_kl_temperature, pooling=args.pooling)
                 if not torch.isfinite(loss):
@@ -209,7 +204,7 @@ def train(args):
                     scheduler.step()
                 values = {key: float(value) for key, value in metrics.items()}
                 values.update(loss=float(loss.detach()), epoch=epoch + 1, step=epoch * steps_per_epoch + batches + 1,
-                              batch_size=inputs["input_ids"].size(0),
+                              batch_size=first_inputs["input_ids"].size(0),
                               optimizer_step=optimizer_steps, optimizer_skipped=optimizer_skipped,
                               lr=optimizer.param_groups[0]["lr"], grad_scale=scaler.get_scale(),
                               grad_norm=float(grad_norm) if torch.isfinite(grad_norm) else None)
@@ -229,7 +224,9 @@ def train(args):
             if args.run_eval:
                 from ESE.eval import evaluate_model
                 evaluate_model(encoder, tokenizer, dims, output_dir, epoch=epoch + 1,
-                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
+                               eval_tasks=args.eval_tasks, eval_splits=args.eval_splits,
+                               eval_languages=args.eval_languages, batch_size=args.eval_batch_size,
+                               max_length=args.eval_max_length, seed=args.seed)
     return model
 
 
@@ -238,7 +235,7 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
-    parser.add_argument("--data_path", required=True)
+    add_training_data_args(parser)
     parser.add_argument("--output_dir", "--save_dir", dest="output_dir", default="checkpoints/ESE")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -264,9 +261,7 @@ def parse_args(argv=None):
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Reduce encoder activation memory")
     parser.add_argument("--log_every", type=int, default=10, help="Flush metrics and log progress every N batches")
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate every epoch")
-    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent))
-    parser.add_argument("--eval_batch_size", type=int, default=64)
+    add_eval_args(parser, training=True)
     return parser.parse_args(argv)
 
 

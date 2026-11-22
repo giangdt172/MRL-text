@@ -9,6 +9,8 @@ import math
 import torch
 from torch.nn import functional as F
 
+from common.loss import info_nce as pair_info_nce
+
 
 def resolve_dims(full_dim, dims=None):
     dims = list(dims) if dims is not None else [d for d in (16, 32, 64, 128, 256, 512) if d < full_dim]
@@ -27,8 +29,7 @@ def pool_hidden(hidden, attention_mask, pooling):
 
 
 def info_nce(first, second, temperature):
-    logits = F.normalize(first, dim=-1) @ F.normalize(second, dim=-1).T / temperature
-    return F.cross_entropy(logits, torch.arange(first.size(0), device=first.device))
+    return pair_info_nce(first, second, temperature)[0]
 
 
 @torch.no_grad()
@@ -54,7 +55,7 @@ def ese_loss(hidden_first, hidden_second, mask_first, mask_second, *,
 
     Excludes HF hidden_states[0] (token embeddings). Intermediate block losses
     use 1/(1+ln(i)), averaged over the n-1 intermediate blocks as in AnglE.
-    The final block is unweighted. Two dropout views share one PCA target basis.
+    The final block is unweighted. Anchors and positives share one PCA target basis.
     """
     if len(hidden_first) != len(hidden_second) or len(hidden_first) < 2:
         raise ValueError("Expected embedding states followed by at least one Transformer block.")

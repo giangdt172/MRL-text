@@ -10,20 +10,18 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-import pandas as pd
 import torch
 from tqdm import tqdm
+
+from common.mteb_eval import add_eval_args, validate_eval_args
 from transformers import AutoModel, get_scheduler
 
 from MRL.config import MODEL_CONFIGS
-from MRL.data_preparation import build_train_loader
-from MRL.loss import Matry_infonce, info_nce, resolve_dims
+from common.data_preparation import (
+    DATASET_NAME, add_training_data_args, batch_inputs, build_train_loader, validate_training_data_args,
+)
+from MRL.loss import Matry_infonce, resolve_dims
 
-
-def batch_inputs(batch, side, device):
-    return {key: batch[f"{key}{side}_stu"].to(device, non_blocking=device.type == "cuda")
-            for key in ("input_ids", "attention_mask", "token_type_ids")
-            if f"{key}{side}_stu" in batch}
 
 def mean_pooling(hidden, attention_mask):
     mask = attention_mask.unsqueeze(-1).float()
@@ -31,8 +29,8 @@ def mean_pooling(hidden, attention_mask):
 
 
 def validate_args(args):
-    if args.epochs < 1 or args.batch_size < 1 or args.max_length < 1:
-        raise ValueError("epochs, batch_size and max_length must be positive.")
+    if args.epochs < 1 or args.batch_size < 2 or args.max_length < 1:
+        raise ValueError("epochs/max_length must be positive; batch_size must be at least two.")
     if not math.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("lr must be positive and finite.")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -49,12 +47,8 @@ def validate_args(args):
         raise ValueError("log_every must be positive.")
     if args.no_amp and args.precision not in {"auto", "fp32"}:
         raise ValueError("--no_amp cannot be combined with --precision fp16/bf16.")
-    data_path = Path(args.data_path).expanduser().resolve()
-    if not data_path.is_file():
-        raise FileNotFoundError(f"Training CSV not found: {data_path}. Set --data_path to your CSV.")
-    if "text" not in pd.read_csv(data_path, nrows=0).columns:
-        raise ValueError(f"Training CSV must contain a 'text' column: {data_path}")
-    args.data_path = str(data_path)
+    validate_training_data_args(args)
+    validate_eval_args(args)
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
 
 
@@ -98,9 +92,6 @@ def configure_logging(output_dir):
 
 def train(args):
     validate_args(args)
-    if args.run_eval:
-        from MRL.eval import check_eval_data
-        check_eval_data(args.eval_work_dir)
     device, precision = resolve_device_precision(args.device, args.precision, args.no_amp)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -115,10 +106,12 @@ def train(args):
         logger.info("Device: CPU | precision=%s", precision)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
     logger.info("Model: %s | loss_type: %s | data: %s | output: %s",
-                model_name, "mrl", args.data_path, output_dir)
-    # Use the existing CSV mapping, two-view collator, and loader without changes.
-    loader, tokenizer, _ = build_train_loader(
-        args.data_path, model_name, "pair_cls", args.max_length, args.batch_size, args.num_workers)
+                model_name, "mrl", args.data_path or DATASET_NAME, output_dir)
+    loader, tokenizer = build_train_loader(
+        args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
+        seed=args.seed, max_train_samples=args.max_train_samples,
+        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+    logger.info("Training pairs: %s", loader.dataset.metadata)
     encoder = AutoModel.from_pretrained(model_name).to(device)
     if args.gradient_checkpointing:
         encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -153,7 +146,7 @@ def train(args):
             p = encoder(**second, return_dict=True).last_hidden_state[:, 0, :]
         return q, p
 
-    configuration = {**vars(args), "model_name": model_name, "matryoshka_dims": dims,
+    configuration = {**vars(args), "training_data": loader.dataset.metadata, "model_name": model_name, "matryoshka_dims": dims,
                      "level_weights": weights, "loss_type": "mrl", "pooling": "cls",
                      "warmup_steps": warmup_steps, "scheduler": "cosine_with_min_lr",
                      "loss_reduction": "sum", "singleton_batches": "keep",
@@ -218,7 +211,9 @@ def train(args):
             if args.run_eval:
                 from MRL.eval import evaluate_model
                 evaluate_model(encoder, tokenizer, dims, output_dir, epoch=epoch + 1,
-                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
+                               eval_tasks=args.eval_tasks, eval_splits=args.eval_splits,
+                               eval_languages=args.eval_languages, batch_size=args.eval_batch_size,
+                               max_length=args.eval_max_length, seed=args.seed)
     return model
 
 
@@ -227,7 +222,7 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
-    parser.add_argument("--data_path", required=True)
+    add_training_data_args(parser)
     parser.add_argument("--output_dir", default="checkpoints/MRL")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -250,9 +245,7 @@ def parse_args(argv=None):
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Reduce encoder activation memory")
     parser.add_argument("--log_every", type=int, default=10, help="Flush metrics and log progress every N batches")
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate every epoch")
-    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent))
-    parser.add_argument("--eval_batch_size", type=int, default=64)
+    add_eval_args(parser, training=True)
     return parser.parse_args(argv)
 
 

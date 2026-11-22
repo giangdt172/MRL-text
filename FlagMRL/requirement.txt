@@ -1,17 +1,16 @@
 # Training and evaluation
 torch
 transformers
+datasets
 numpy
 pandas
 tqdm
 scipy
 scikit-learn
+mteb==2.27.20
 
 # SentencePiece tokenizers used by some supported encoders
 sentencepiece
-
-# Download the original dataset bundles
-kaggle
 
 # Offline tests
 pytest

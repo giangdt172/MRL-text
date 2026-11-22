@@ -10,27 +10,25 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-import pandas as pd
 import torch
 from tqdm import tqdm
+
+from common.mteb_eval import add_eval_args, validate_eval_args
 from transformers import AutoModel
 
 from MIPIC.config import MODEL_CONFIGS, model_name_map_short_name
-from MIPIC.data_preparation import build_train_loader
+from common.data_preparation import (
+    DATASET_NAME, add_training_data_args, batch_inputs, build_train_loader, validate_training_data_args,
+)
 from MIPIC.loss import (
     CKALoss, HorizontalAttentionAlignment, SubmatrixCKALoss,
     PipelineInfoNCELoss, TotalAlignmentLoss, Matry_infonce, pool_hidden,
 )
 
 
-def batch_inputs(batch, side, device):
-    return {key: batch[f"{key}{side}_stu"].to(device, non_blocking=device.type == "cuda")
-            for key in ("input_ids", "attention_mask", "token_type_ids")
-            if f"{key}{side}_stu" in batch}
-
 def validate_args(args):
-    if args.epochs < 1 or args.batch_size < 1 or args.max_length < 1:
-        raise ValueError("epochs, batch_size and max_length must be positive.")
+    if args.epochs < 1 or args.batch_size < 2 or args.max_length < 1:
+        raise ValueError("epochs/max_length must be positive; batch_size must be at least two.")
     if not math.isfinite(args.lr) or args.lr <= 0:
         raise ValueError("lr must be positive and finite.")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
@@ -45,14 +43,9 @@ def validate_args(args):
         raise ValueError("eval_batch_size must be positive.")
     if args.no_amp and args.precision not in {"auto", "fp32"}:
         raise ValueError("--no_amp cannot be combined with --precision fp16/bf16.")
-    data_path = Path(args.data_path).expanduser().resolve()
-    if not data_path.is_file():
-        raise FileNotFoundError(f"Training CSV not found: {data_path}. Set --data_path to your CSV.")
-    if "text" not in pd.read_csv(data_path, nrows=0).columns:
-        raise ValueError(f"Training CSV must contain a 'text' column: {data_path}")
-    args.data_path = str(data_path)
+    validate_training_data_args(args)
+    validate_eval_args(args)
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
-    args.eval_work_dir = str(Path(args.eval_work_dir).expanduser().resolve())
 
 
 def resolve_device_precision(device_name=None, precision="auto", no_amp=False):
@@ -175,9 +168,6 @@ def stable_batch_loss(encoder, alignment, first, second, dims, pooling, temperat
 
 def train(args):
     validate_args(args)
-    if args.run_eval:
-        from MIPIC.eval import check_eval_data
-        check_eval_data(args.eval_work_dir)
     if args.num_workers < 0 or args.base_k < 1 or args.d_att < 1:
         raise ValueError("num_workers must be nonnegative; base_k/d_att must be positive.")
     device, precision = resolve_device_precision(args.device, args.precision, args.no_amp)
@@ -191,10 +181,13 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
     logger.info("Model: %s | device: %s | precision: %s | output: %s", model_name, device, precision, output_dir)
-    logger.info("Training data: %s | eval data root: %s | eval every epoch: %s",
-                args.data_path, args.eval_work_dir, bool(args.run_eval))
-    loader, tokenizer, _ = build_train_loader(
-        args.data_path, model_name, "pair_cls", args.max_length, args.batch_size, args.num_workers)
+    logger.info("Training data: %s | MTEB tasks: %s | eval every epoch: %s",
+                args.data_path or DATASET_NAME, args.eval_tasks, bool(args.run_eval))
+    loader, tokenizer = build_train_loader(
+        args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
+        seed=args.seed, max_train_samples=args.max_train_samples,
+        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+    logger.info("Training pairs: %s", loader.dataset.metadata)
     # AMP controls forward precision; optimizer parameters/gradients stay FP32.
     # Checkpoints (notably Qwen) may otherwise load native BF16 weights, which
     # CUDA GradScaler cannot unscale on some PyTorch versions.
@@ -223,7 +216,8 @@ def train(args):
     logger.info("Parameter dtype: %s | autocast: %s | GradScaler enabled: %s",
                 next(encoder.parameters()).dtype, precision, scaler.is_enabled())
     configuration = {
-        **vars(args), "model_name": model_name, "matryoshka_dims": dims,
+        **vars(args), "training_data": loader.dataset.metadata,
+        "model_name": model_name, "matryoshka_dims": dims,
         "align_layers": layers, "pipeline_pairs": pipes, "warmup_steps": 0,
         "scheduler": "constant_notebook_effective", "alignment_lr": args.lr * 2,
         "attention_kl_enabled": False, "cka_dtype": "float64", "selected_padding": "keep",
@@ -290,7 +284,9 @@ def train(args):
             if args.run_eval:
                 from MIPIC.eval import evaluate_model
                 evaluate_model(encoder, tokenizer, dims, output_dir, epoch=epoch + 1,
-                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
+                               eval_tasks=args.eval_tasks, eval_splits=args.eval_splits,
+                               eval_languages=args.eval_languages, batch_size=args.eval_batch_size,
+                               max_length=args.eval_max_length, seed=args.seed)
     return encoder
 
 
@@ -299,9 +295,7 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
-    parser.add_argument("--data_path",
-                        default=str(Path(__file__).resolve().parent.parent / "final-data" / "final_data.csv"),
-                        help="Training CSV with a text column")
+    add_training_data_args(parser)
     parser.add_argument("--output_dir", default="checkpoints/MIPIC")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -326,10 +320,7 @@ def parse_args(argv=None):
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--log_every", type=int, default=10)
-    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate every epoch")
-    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent.parent),
-                        help="Dataset root containing multitask-data/ and sts-data/ (not MIPIC/)")
-    parser.add_argument("--eval_batch_size", type=int, default=64)
+    add_eval_args(parser, training=True)
     return parser.parse_args(argv)
 
 

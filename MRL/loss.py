@@ -1,7 +1,6 @@
 import math
 
-import torch
-from torch.nn import functional as F
+from common.loss import info_nce
 
 
 def resolve_dims(full_dim, dims=None):
@@ -15,15 +14,6 @@ def resolve_dims(full_dim, dims=None):
                        for d in dims):
         raise ValueError("Each dimension must be an integer in [1, full_dim].")
     return sorted(set(dims + [full_dim]))
-
-
-def info_nce(q, k, temperature=0.07):
-    """One-way in-batch InfoNCE with diagonal positive pairs."""
-    if not math.isfinite(temperature) or temperature <= 0:
-        raise ValueError("temperature must be positive and finite.")
-    logits = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).T / temperature
-    labels = torch.arange(q.size(0), device=q.device)
-    return F.cross_entropy(logits, labels), logits
 
 
 def Matry_infonce(a, b, temperature=0.07, nested_dims=None, *, level_weights=None):

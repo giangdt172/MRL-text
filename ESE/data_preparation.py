@@ -1,32 +1,8 @@
-"""
-Data preparation module - shared across all models.
-Handles dataset classes, collators, and dataloader construction.
-"""
+"""Evaluation datasets and collators; training preparation lives in common/."""
 
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer
-
-class TextDataset(Dataset):
-    def __init__(self, texts):
-        self.texts = list(texts)
-
-    def __len__(self):
-        return len(self.texts)
-
-    def __getitem__(self, index):
-        return self.texts[index]
-
-
-class TextCollator:
-    def __init__(self, tokenizer, max_length):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __call__(self, texts):
-        return self.tokenizer(texts, padding=True, truncation=True,
-                              max_length=self.max_length, return_tensors="pt")
+from torch.utils.data import Dataset
 
 
 # ─────────────────────────────────────────────
@@ -112,27 +88,6 @@ def clf_collate_fn(batch, tokenizer, max_len=512):
         "attention_mask1": enc1["attention_mask"],
         "labels": labels,
     }
-
-
-# ─────────────────────────────────────────────
-# Build training dataloader
-# ─────────────────────────────────────────────
-def build_train_loader(data_path, model_name, max_length=256, batch_size=16, num_workers=2):
-    frame = pd.read_csv(data_path)
-    if "text" not in frame or frame.empty or frame["text"].isna().any():
-        raise ValueError("Training CSV must have a nonempty 'text' column without null values.")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token_id is None:
-            raise ValueError("Tokenizer needs a pad token or EOS token for batching.")
-        tokenizer.pad_token = tokenizer.eos_token
-    dataset = TextDataset(frame["text"].astype(str))
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
-                        collate_fn=TextCollator(tokenizer, max_length),
-                        num_workers=num_workers, persistent_workers=num_workers > 0,
-                        pin_memory=torch.cuda.is_available())
-    # Tokenize once; two encoder forwards provide independent dropout views.
-    return loader, tokenizer
 
 
 # ─────────────────────────────────────────────

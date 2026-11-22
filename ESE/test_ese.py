@@ -1,4 +1,4 @@
-"""Offline checks for PCA targets, layer supervision, and checkpoint evaluation."""
+"""Offline checks for PCA targets, layer supervision, and checkpoint reloads."""
 
 import json
 import math
@@ -10,7 +10,6 @@ import torch
 from torch.nn import functional as F
 from transformers import BertConfig, BertModel, BertTokenizer
 
-from ESE.eval import evaluate, evaluation_paths
 from ESE.loss import compression_loss, ese_loss, pca_compress, pool_hidden
 from ESE.train import parse_args, train
 
@@ -74,7 +73,7 @@ def test_single_block_and_invalid_compression():
         ese_loss(states, states, mask, mask, compression_size=5)
 
 
-def test_offline_train_save_reload_and_evaluate(tmp_path):
+def test_offline_train_save_and_reload(tmp_path):
     # Keep CPU smoke checks small and independent of model downloads/GPU access.
     previous_threads = torch.get_num_threads()
     torch.set_num_threads(1)
@@ -95,28 +94,14 @@ def test_offline_train_save_reload_and_evaluate(tmp_path):
         texts = ["good day", "bad night", "happy sun", "sad rain", "good sun", "bad rain",
                  "happy day", "sad night"]
         training_csv = tmp_path / "train.csv"
-        pd.DataFrame({"text": texts}).to_csv(training_csv, index=False)
-        eval_work_dir = tmp_path / "ESE"
-        tasks = evaluation_paths(eval_work_dir)
-        for paths in tasks["classification"]:
-            for path in paths:
-                destination = Path(path)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame({"text": texts, "label": [0, 1] * 4}).to_csv(path, index=False)
-        for kind, label_name in (("pair", "label"), ("sts", "score")):
-            for path in tasks[kind]:
-                destination = Path(path)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame({"sentence1": texts, "sentence2": texts[::-1],
-                              label_name: ([0, 1] * 4 if kind == "pair" else list(range(8)))
-                              }).to_csv(path, index=False)
+        pd.DataFrame({"anchor": texts, "positive": texts[::-1]}).to_csv(training_csv, index=False)
         output_dir = tmp_path / "checkpoint"
         args = parse_args([
             "--model_name", str(model_dir), "--data_path", str(training_csv),
             "--output_dir", str(output_dir), "--device", "cpu", "--epochs", "1",
             "--batch_size", "4", "--num_workers", "0", "--max_length", "16",
             "--ese_compression_size", "4", "--matryoshka_dims", "4", "16",
-            "--gradient_checkpointing", "--run_eval", "1", "--eval_work_dir", str(eval_work_dir),
+            "--gradient_checkpointing", "--run_eval", "0",
         ])
         trained = train(args)
         assert not torch.equal(original.embeddings.word_embeddings.weight,
@@ -126,15 +111,12 @@ def test_offline_train_save_reload_and_evaluate(tmp_path):
         saved_config = json.loads((output_dir / "training_config.json").read_text())
         assert saved_config["pooling"] == "mean"
         assert saved_config["training_dims"] == [4, 16]
+        assert saved_config["training_data"]["num_pairs"] == len(texts)
         rows = [json.loads(row) for row in (output_dir / "training_metrics.jsonl").read_text().splitlines()]
         assert len(rows) == 2 and rows[-1]["optimizer_step"] == 2
         assert all(math.isfinite(row["loss"]) and row["compress_loss"] > 0 for row in rows)
-        per_epoch = json.loads((output_dir / "result_epoch_1.json").read_text())
-        assert len(per_epoch["classification"]) == 3
-        assert len(per_epoch["pair"]) == 3
-        assert len(per_epoch["sts"]) == 8
-        reloaded = evaluate(output_dir, device="cpu", eval_work_dir=eval_work_dir, batch_size=4)
-        for name in ("classification", "pair", "sts"):
-            assert reloaded[name] == per_epoch[name]
+        reloaded = BertModel.from_pretrained(output_dir)
+        torch.testing.assert_close(reloaded.embeddings.word_embeddings.weight,
+                                   trained.embeddings.word_embeddings.weight)
     finally:
         torch.set_num_threads(previous_threads)

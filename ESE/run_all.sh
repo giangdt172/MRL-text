@@ -5,15 +5,24 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 # ── Configurable defaults ──────────────────────────────────────────────────
-DATA_PATH="${DATA_PATH:-$PROJECT_DIR/final-data/final_data.csv}"
+# Empty DATA_PATH loads Quora pair/train from Hugging Face.
+DATA_PATH="${DATA_PATH:-}"
+DATA_ARGS=(--max_train_samples "${MAX_TRAIN_SAMPLES:-150000}")
+
+# Default: the 21 tasks in common/mteb_tasks.py. EVAL_TASKS can override them.
+# Example: EVAL_TASKS="STSBenchmark SICK-R".
+read -r -a MTEB_TASKS <<< "${EVAL_TASKS:-}"
+EVAL_ARGS=(--eval_batch_size "${EVAL_BATCH_SIZE:-64}" --eval_max_length "${EVAL_MAX_LENGTH:-256}"
+           --eval_splits test --eval_languages eng)
+if (( ${#MTEB_TASKS[@]} )); then EVAL_ARGS+=(--eval_tasks "${MTEB_TASKS[@]}"); fi
+if [[ -n "$DATA_PATH" ]]; then DATA_ARGS+=(--data_path "$DATA_PATH"); fi
 EPOCHS="${EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 LR="${LR:-2e-5}"
-SAVE_ROOT="${SAVE_ROOT:-$PROJECT_DIR/checkpoints/ESE}"
+SAVE_ROOT="${SAVE_ROOT:-$PROJECT_DIR/checkpoints/ESE/quora-duplicates-pair}"
 LOG_ROOT="${LOG_ROOT:-$PROJECT_DIR/logs/ESE}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda}"
-EVAL_WORK_DIR="${EVAL_WORK_DIR:-$PROJECT_DIR/ESE}"
 
 # ── Parse flags ───────────────────────────────────────────────────────────
 PARALLEL=false
@@ -55,11 +64,11 @@ train_model() {
 
     mkdir -p "$CKPT_DIR"
 
-    local RUN_EVAL=1
+    local RUN_EVAL="${RUN_EVAL:-1}"
     if $TRAIN_ONLY; then RUN_EVAL=0; fi
     "$PYTHON_BIN" -u ESE/train.py \
         --model_key   "${KEY}" \
-        --data_path   "${DATA_PATH}" \
+        "${DATA_ARGS[@]}" \
         --epochs      "${EPOCHS}" \
         --batch_size  "${BATCH_SIZE}" \
         --lr          "${LR}" \
@@ -68,8 +77,7 @@ train_model() {
         --ese_compression_size "${ESE_COMPRESSION_SIZE:-128}" \
         --ese_kl_temperature "${ESE_KL_TEMPERATURE:-1.0}" \
         --pooling "${POOLING:-mean}" \
-        --run_eval "$RUN_EVAL" --eval_work_dir "$EVAL_WORK_DIR" \
-        --eval_batch_size "${EVAL_BATCH_SIZE:-64}" \
+        --run_eval "$RUN_EVAL" "${EVAL_ARGS[@]}" \
         2>&1 | tee "${LOG_FILE}"
 
     echo "✅ Training finished for ${KEY}"
@@ -95,7 +103,7 @@ eval_model() {
 
     "$PYTHON_BIN" -u ESE/eval.py \
         --checkpoint_dir "$CKPT_DIR" --device "$DEVICE" \
-        --eval_work_dir "$EVAL_WORK_DIR" --batch_size "${EVAL_BATCH_SIZE:-64}" \
+        "${EVAL_ARGS[@]}" \
         2>&1 | tee "${LOG_FILE}"
 
     echo "✅ Evaluation finished for ${KEY}"

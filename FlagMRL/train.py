@@ -12,21 +12,18 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
-import pandas as pd
 import torch
 from tqdm import tqdm
+
+from common.mteb_eval import add_eval_args, validate_eval_args
 from transformers import AutoModel, get_scheduler
 
 from FlagMRL.config import MODEL_CONFIGS
-from FlagMRL.data_preparation import build_train_loader
+from common.data_preparation import (
+    DATASET_NAME, add_training_data_args, batch_inputs, build_train_loader, validate_training_data_args,
+)
 from FlagMRL import FLAG_OBJECTIVES, FlagMRLLoss, FlagProjector
 from FlagMRL.model import FlagTextModel, mean_pooling
-
-
-def batch_inputs(batch, side, device):
-    return {key: batch[f"{key}{side}_stu"].to(device, non_blocking=device.type == "cuda")
-            for key in ("input_ids", "attention_mask", "token_type_ids")
-            if f"{key}{side}_stu" in batch}
 
 
 def positive_ids(inputs):
@@ -53,16 +50,12 @@ def validate_args(args):
         raise ValueError("Flag warmup requires flag_init_batches >= 1.")
     if args.log_every < 1:
         raise ValueError("log_every must be positive.")
-    if args.eval_batch_size < 1:
-        raise ValueError("eval_batch_size must be positive.")
+    if args.num_workers < 0 or args.eval_batch_size < 1:
+        raise ValueError("num_workers must be nonnegative; eval_batch_size must be positive.")
     if args.no_amp and args.precision not in {"auto", "fp32"}:
         raise ValueError("--no_amp cannot be combined with --precision fp16/bf16.")
-    data_path = Path(args.data_path).expanduser().resolve()
-    if not data_path.is_file():
-        raise FileNotFoundError(f"Training CSV not found: {data_path}. Set --data_path to your CSV.")
-    if "text" not in pd.read_csv(data_path, nrows=0).columns:
-        raise ValueError(f"Training CSV must contain a 'text' column: {data_path}")
-    args.data_path = str(data_path)
+    validate_training_data_args(args)
+    validate_eval_args(args)
     args.output_dir = str(Path(args.output_dir).expanduser().resolve())
 
 
@@ -120,12 +113,12 @@ def train(args):
         logger.info("Device: CPU | precision=%s", precision)
     model_name = args.model_name or MODEL_CONFIGS[args.model_key]["model_name"]
     logger.info("Model: %s | flag_objective: %s | data: %s | output: %s",
-                model_name, args.flag_objective, args.data_path, output_dir)
-    # Use the existing CSV mapping, two-view collator, and loader without changes.
-    loader, tokenizer, _ = build_train_loader(
-        args.data_path, model_name, "pair_cls", args.max_length, args.batch_size)
-    if len(loader.dataset) < 2:
-        raise ValueError("Contrastive training needs at least two text examples.")
+                model_name, args.flag_objective, args.data_path or DATASET_NAME, output_dir)
+    loader, tokenizer = build_train_loader(
+        args.data_path, model_name, args.max_length, args.batch_size, args.num_workers,
+        seed=args.seed, max_train_samples=args.max_train_samples,
+        data_cache_dir=args.data_cache_dir, dataset_revision=args.dataset_revision)
+    logger.info("Training pairs: %s", loader.dataset.metadata)
     encoder = AutoModel.from_pretrained(model_name).to(device)
     if args.gradient_checkpointing:
         encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -167,7 +160,7 @@ def train(args):
     if args.flag_init == "warmup":
         logger.info("Initializing flag basis (%s) with up to %d frozen-encoder batches",
                     criterion.flag_objective, args.flag_init_batches)
-        # Freeze gradients while retaining dropout for two distinct views.
+        # Initialize on annotated pairs without updating the encoder.
         encoder.train()
         with torch.no_grad():
             for index, batch in enumerate(loader):
@@ -177,7 +170,7 @@ def train(args):
                 projector.step(q, p, torch.arange(q.size(0), device=device), ids,
                                args.flag_far_mode, args.flag_far_tau, objective=criterion.flag_objective)
 
-    configuration = {**vars(args), "model_name": model_name, "matryoshka_dims": projector.dims,
+    configuration = {**vars(args), "training_data": loader.dataset.metadata, "model_name": model_name, "matryoshka_dims": projector.dims,
                      "resolved_device": str(device), "resolved_precision": precision,
                      "torch_version": str(torch.__version__)}
     (output_dir / "training_config.json").write_text(json.dumps(configuration, indent=2) + "\n")
@@ -190,7 +183,7 @@ def train(args):
             loss_sum, batches, skipped_steps = 0.0, 0, 0
             for batch in progress:
                 # A singleton tail supplies no in-batch negative and has zero CE.
-                if batch["input_ids1_stu"].size(0) < 2:
+                if batch["anchor"]["input_ids"].size(0) < 2:
                     continue
                 optimizer.zero_grad(set_to_none=True)
                 q, p, ids = encode(batch)
@@ -234,7 +227,9 @@ def train(args):
                 optimizer.zero_grad(set_to_none=True)
                 logger.info("Evaluating epoch %d", epoch + 1)
                 evaluate_model(model, tokenizer, projector.dims, output_dir, epoch=epoch + 1,
-                               eval_work_dir=args.eval_work_dir, batch_size=args.eval_batch_size)
+                               eval_tasks=args.eval_tasks, eval_splits=args.eval_splits,
+                               eval_languages=args.eval_languages, batch_size=args.eval_batch_size,
+                               max_length=args.eval_max_length, seed=args.seed)
     return model
 
 
@@ -243,7 +238,7 @@ def parse_args(argv=None):
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model_name", help="Hugging Face model name or local encoder path")
     source.add_argument("--model_key", choices=list(MODEL_CONFIGS))
-    parser.add_argument("--data_path", required=True)
+    add_training_data_args(parser)
     parser.add_argument("--flag_objective", choices=list(FLAG_OBJECTIVES), default="trace_ratio",
                         help="Objective for the flag update; encoder MRL loss is shared")
     parser.add_argument("--output_dir", default="checkpoints/FlagMRL")
@@ -277,10 +272,9 @@ def parse_args(argv=None):
                         help="auto selects BF16 on supported GPUs, otherwise FP16; CPU uses FP32")
     parser.add_argument("--no_amp", action="store_true", help="Compatibility alias for --precision fp32")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Reduce encoder activation memory")
+    parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--log_every", type=int, default=10, help="Flush metrics and log progress every N batches")
-    parser.add_argument("--run_eval", type=int, choices=[0, 1], default=1, help="Evaluate after every epoch")
-    parser.add_argument("--eval_work_dir", default=str(Path(__file__).resolve().parent))
-    parser.add_argument("--eval_batch_size", type=int, default=64)
+    add_eval_args(parser, training=True)
     return parser.parse_args(argv)
 
 
