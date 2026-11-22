@@ -99,6 +99,43 @@ def test_real_mteb_selected_tasks_results_and_rng_restoration(encoder_dir, offli
     assert "| 1 | cosine_spearman |" in (tmp_path / "summary_all_epochs.txt").read_text()
 
 
+def test_mteb_loads_uncached_json_dataset(encoder_dir, monkeypatch, tmp_path):
+    """Exercise MTEB -> load_dataset -> DownloadManager, including first-time loading."""
+    monkeypatch.setenv("MTEB_CACHE", str(tmp_path / "mteb-cache"))
+    mteb = pytest.importorskip("mteb")
+    original_get_task = mteb.get_task
+    data_file = tmp_path / "sts.jsonl"
+    records = [
+        {"sentence1": "good day", "sentence2": "good day", "score": 5.0},
+        {"sentence1": "bad night", "sentence2": "good day", "score": 0.0},
+        {"sentence1": "sun", "sentence2": "sun day", "score": 4.0},
+        {"sentence1": "rain", "sentence2": "bad night", "score": 2.0},
+        {"sentence1": "good", "sentence2": "rain", "score": 1.0},
+        {"sentence1": "day sun", "sentence2": "sun", "score": 3.0},
+    ]
+    data_file.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    def get_task(name, **kwargs):
+        task = original_get_task(name, **kwargs)
+        task.metadata = task.metadata.model_copy(update={
+            "superseded_by": None,
+            "dataset": {"path": "json", "revision": "local-test", "data_files": {"test": str(data_file)},
+                        "cache_dir": str(tmp_path / "dataset-cache")},
+        })
+        assert not task.data_loaded
+        return task
+
+    monkeypatch.setattr(mteb, "get_task", get_task)
+    model = AutoModel.from_pretrained(encoder_dir).train()
+    tokenizer = AutoTokenizer.from_pretrained(encoder_dir)
+    result = evaluate_model(model, tokenizer, [4, 16], tmp_path / "results",
+                            eval_tasks=["STSBenchmark"], batch_size=2)
+    assert model.training
+    assert set(result["scores"]) == {"dim_4", "dim_16"}
+    assert all(np.isfinite(scores["STSBenchmark"]) for scores in result["scores"].values())
+    assert list((tmp_path / "dataset-cache").rglob("*.arrow"))
+
+
 def test_mteb_failure_restores_training_mode_and_rng(encoder_dir, offline_mteb, monkeypatch, tmp_path):
     mteb, _ = offline_mteb
     model = AutoModel.from_pretrained(encoder_dir).train()

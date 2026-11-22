@@ -153,8 +153,9 @@ def evaluate_model(model, tokenizer, dims, output_dir, *, eval_tasks=None, epoch
                     "embed_dim": dim, "max_tokens": max_length,
                     "modalities": ["text"], "similarity_fn_name": "cosine"})
                 # Never reuse scores from a different epoch, checkpoint, or dimension.
+                # MTEB forwards num_proc to datasets.load_dataset; 0 causes division by zero there.
                 model_result = mteb.evaluate(adapter, tasks=tasks, cache=None, overwrite_strategy="always",
-                                             co2_tracker=False, raise_error=True, num_proc=0,
+                                             co2_tracker=False, raise_error=True, num_proc=None,
                                              encode_kwargs={"batch_size": batch_size})
                 key = f"dim_{dim}"
                 results["scores"][key] = {task.task_name: task.get_score() for task in model_result.task_results}
